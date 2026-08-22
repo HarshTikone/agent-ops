@@ -1,0 +1,47 @@
+# Local hooks that reuse the exact same tools/configs as CI (backend's
+# pyproject.toml, frontend's eslint.config.js/.prettierrc.json) so a commit
+# never passes locally and fails in GitHub Actions for a different reason.
+#
+# Setup (once): pip install pre-commit && pre-commit install
+# Requires backend/.venv (or an active env with requirements-dev.txt
+# installed) and frontend/node_modules to already exist.
+repos:
+  - repo: local
+    hooks:
+      - id: backend-ruff
+        name: backend ruff check
+        entry: bash -c 'cd backend && ruff check .'
+        language: system
+        files: ^backend/.*\.py$
+        pass_filenames: false
+
+      - id: backend-black
+        name: backend black --check
+        entry: bash -c 'cd backend && black --check .'
+        language: system
+        files: ^backend/.*\.py$
+        pass_filenames: false
+
+      - id: frontend-eslint
+        name: frontend eslint
+        entry: bash -c 'cd frontend && npm run lint'
+        language: system
+        files: ^frontend/.*\.(ts|tsx)$
+        pass_filenames: false
+
+      - id: frontend-prettier
+        name: frontend prettier --check
+        entry: bash -c 'cd frontend && npm run format:check'
+        language: system
+        files: ^frontend/.*\.(ts|tsx|css|json|md)$
+        pass_filenames: false
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: detect-private-key
