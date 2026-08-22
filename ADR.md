@@ -425,3 +425,63 @@ have applied to its original four before claiming mitigation.
   suite (`test_health.py`, the frontend tests) — the same failure mode
   (assert-the-helper-not-the-behavior) could exist elsewhere and hasn't
   been checked. Flagged here rather than silently assumed fine.
+
+---
+
+## ADR-008: Correction — ADR-004's `typescript` version was never actually installed
+
+**Date:** 2026-08-22 (post-scaffold correction)
+
+**Context**
+
+ADR-004 lists `typescript` 7.0.2 among the versions "pinned as the scaffold's
+initial dependency versions" from a live npm registry query. Checked directly
+against what's actually in the repo:
+
+- `frontend/package.json`: `"typescript": "~6.0.2"`.
+- `frontend/package-lock.json`: resolves `node_modules/typescript` to
+  **6.0.3** (an in-range patch bump `~6.0.2` allows).
+- Peer-dependency ceiling, read directly from `package-lock.json`:
+  `@typescript-eslint/eslint-plugin`, `@typescript-eslint/parser`,
+  `@typescript-eslint/*`, and `typescript-eslint` itself all declare
+  `peerDependencies.typescript: ">=4.8.4 <6.1.0"`. TypeScript 7.0.2 is
+  outside that range by a full major version — it could never have
+  installed alongside `typescript-eslint` 8.67.0 (also pinned per ADR-004),
+  regardless of what the registry's `latest` tag said at query time.
+
+**What actually happened:** `create-vite`'s `react-ts` template scaffolds its
+own `package.json` with a TypeScript range chosen for compatibility with the
+rest of its generated toolchain — it does not defer to whatever an
+independent "what's current on npm" query says. ADR-004's version table was
+compiled from live registry lookups made *before* running `npm create
+vite@latest`, and the TypeScript entry was never reconciled against what the
+scaffolding tool actually wrote. Every other package in ADR-004's list was
+spot-checked the same way — reading the resolved version directly out of
+`package-lock.json` (backend equivalently out of `requirements.txt`/
+`requirements-dev.txt`, which are hand-written rather than tool-generated) —
+and **all of them match ADR-004 exactly**: `react` 19.2.8, `vite` 8.2.2,
+`tailwindcss` 4.3.3, `@vitejs/plugin-react` 6.1.0, `vitest` 4.1.11, `eslint`
+10.9.0 on the frontend; `langgraph` 1.2.11, `fastapi` 0.141.1, `pydantic`
+2.13.4, `uvicorn` 0.52.4, `ruff` 0.16.4, `pytest` 9.1.1, `supabase` 2.31.0,
+`httpx` 0.28.1, `openai` 3.3.1, `langchain-openai` 1.6.0,
+`langchain-google-genai` 4.3.5, `tenacity` 9.1.4, `structlog` 26.1.0,
+`slowapi` 0.1.10, `python-dotenv` 1.2.3 on the backend. `typescript` is the
+only drift found.
+
+**Decision:** correct the record, not the code. `typescript` `~6.0.2`
+(resolving `6.0.3`) is the right pin — it's what's actually installed,
+actually builds, and actually satisfies `typescript-eslint`'s peer range.
+ADR-004's text is left as originally written (append-only convention); this
+entry is the correction of record. No file changes result from this ADR.
+
+**What we gave up**
+
+- Nothing functionally — no code or dependency changes here, only a
+  documentation correction. The cost paid was earlier: ADR-004 stated a
+  fact (a specific version number) without verifying it against the
+  artifact it was supposedly describing (`package.json`/`package-lock.json`),
+  checking only the external registry instead. The lesson generalizes past
+  this one field: a "verified against a live source" claim needs the
+  live source to be *the thing the ADR is actually about*, not a step
+  earlier in the pipeline that a later tool (here, `create-vite`'s own
+  dependency resolution) can silently override.
