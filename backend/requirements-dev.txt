@@ -1,0 +1,7 @@
+-r requirements.txt
+
+ruff==0.16.4
+black==26.5.1
+pytest==9.1.1
+pytest-asyncio==1.4.0
+httpx==0.28.1  # already in requirements.txt; kept explicit for TestClient use

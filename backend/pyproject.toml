@@ -1,0 +1,25 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"  # matches the interpreter used for local dev/CI
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]  # line length handled by formatter, not the linter
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's Depends()/Query()/Path() are meant to be called in argument
+# defaults — that's the framework's dependency-injection pattern, not the
+# mutable-default-argument bug B008 otherwise correctly flags.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"

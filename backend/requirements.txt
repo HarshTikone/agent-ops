@@ -1,0 +1,22 @@
+# Runtime dependencies. Versions pinned from a live PyPI snapshot taken
+# 2026-08-22 (see ADR-004) — bump deliberately, not by accident.
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.4
+pydantic-settings==2.15.0
+python-dotenv==1.2.3
+
+# Agent graph (wired up starting Day 2)
+langgraph==1.2.11
+langchain-google-genai==4.3.5
+langchain-openai==1.6.0
+openai==3.3.1
+
+# Database / memory / trace log (wired up starting Day 3)
+supabase==2.31.0
+
+# Cross-cutting
+httpx==0.28.1
+tenacity==9.1.4
+structlog==26.1.0
+slowapi==0.1.10
