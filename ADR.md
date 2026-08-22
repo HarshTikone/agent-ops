@@ -322,3 +322,106 @@ Verified:
   (real platform env vars), and the only place this mattered was local dev,
   where "just works regardless of which directory you're in" is worth more
   than explicitness.
+
+  **Correction (see ADR-007): the claim in the paragraph above that this risk
+  is "mitigated ... by the new regression test" does not hold as originally
+  written — the original test asserted the `_ENV_FILE` constant, never the
+  wiring. ADR-007 records what actually catches the mutation.**
+
+---
+
+## ADR-007: The regression tests from ADR-006 didn't regress-test anything — caught by mutation testing
+
+**Date:** 2026-08-22 (post-ADR-006 correction)
+
+**Context**
+
+ADR-006 added four tests alongside the `.env`-loading fix and claimed, in its
+own "what we gave up" section, that the `parents[2]` magic-index risk was
+"mitigated ... by the new regression test asserting the resolved path's
+shape." That claim was checked with a mutation test — reintroduce the exact
+original bug (`env_file=_ENV_FILE` back to `env_file=".env"`) while leaving
+the new `_REPO_ROOT`/`_ENV_FILE` constants untouched and correct — and it did
+not hold.
+
+**What actually happened, verified directly (not assumed):**
+
+With the mutation applied, `pytest -v` reported **13 passed, 0 failed** — all
+four "regression" tests green — while a direct manual check
+(`Settings().gemini_api_key` from `backend/` against the real, fully
+populated root `.env`) returned `''`. The exact bug ADR-006 fixed was fully
+back, and nothing in the suite noticed.
+
+**Why each test missed it, examined individually:**
+
+- `test_env_file_is_absolute_and_anchored_to_repo_root` asserted on the
+  `_ENV_FILE` *constant* — `_ENV_FILE.is_absolute()` and
+  `_REPO_ROOT / ".env" == _ENV_FILE`. It never read
+  `Settings.model_config["env_file"]`, so a mutation that makes
+  `model_config` ignore the (still-correct) constant is invisible to it by
+  construction. Keeping a computed value correct and *wiring it in* are two
+  separate facts; this test only ever checked the first.
+- `test_settings_loads_real_env_file_regardless_of_cwd` (renamed
+  `test_settings_loads_an_explicit_env_file_path_regardless_of_cwd` below)
+  passed `_env_file=fake_env` as an explicit constructor override. Per
+  pydantic-settings' precedence rules, an explicit init-time `_env_file`
+  always overrides `model_config`'s `env_file`, regardless of what the
+  latter is set to — so this test exercises pydantic-settings' own dotenv-
+  loading mechanism, never `config.py`'s wiring. It passed identically
+  against the original bug and against the reintroduced mutation. Its
+  docstring claimed it "confirms Settings still finds the module-anchored
+  file," which was false — it never touched the module-anchored file at
+  all. The docstring was corrected in place of the assertions, which were
+  fine for what they actually test (kept, renamed, re-scoped honestly).
+- `test_env_file_none_ignores_real_dotenv_even_when_present` and
+  `test_env_file_pointing_at_nonexistent_path_is_a_no_op` both also pass
+  explicit `_env_file` overrides (`None` and a nonexistent path,
+  respectively) for the same structural reason — correct and worth keeping
+  for what they do cover (test-suite determinism; the no-`.env`-at-all
+  deployment shape), but neither was ever regression coverage for this bug,
+  and ADR-006 didn't claim otherwise for these two specifically.
+
+**The generalizable lesson:** a test written immediately after fixing a bug,
+which passes against the fixed code, is not evidence it would fail against
+the bug — those are different claims, and only a mutation test (deliberately
+reintroduce the exact bug, confirm the test now fails, then revert) checks
+the second one. "The suite is green" was insufficient evidence here; it was
+green against both the correct code and the reintroduced bug.
+
+**Decision:** add two tests that were verified, by the same reintroduce-the-
+mutation-and-confirm-red process, to actually catch it:
+
+1. `test_model_config_actually_uses_the_anchored_path` — reads
+   `Settings.model_config["env_file"]` directly (not the `_ENV_FILE`
+   constant) and asserts it equals `_ENV_FILE`. Cheap, deterministic, and
+   fails immediately on the wiring mutation.
+2. `test_settings_reads_repo_root_env_when_started_from_backend` — copies
+   the real `app/` package (located via `Path(app_package.__file__)`, never
+   a hardcoded relative path) into a throwaway `<tmp>/repo/backend/app`,
+   writes a fake `.env` at `<tmp>/repo/.env`, and runs
+   `from app.config import Settings; print(Settings().gemini_api_key)` in a
+   fresh subprocess with CWD set to the fake `backend/` — mirroring
+   production's exact directory shape and exactly how the README says to
+   start `uvicorn`, without ever touching the developer's real `.env`.
+
+Both were confirmed, by direct reproduction, to: **fail** (naming both
+tests) when `env_file=_ENV_FILE` is reverted to `env_file=".env"`, and
+**pass** once reverted back — the same verification standard ADR-006 should
+have applied to its original four before claiming mitigation.
+
+**What we gave up**
+
+- The subprocess-based end-to-end test is slower and more complex than a
+  pure in-process assertion (it shells out to a fresh Python interpreter and
+  does a filesystem copy per run). This is deliberate: the wiring assertion
+  alone (`test_model_config_actually_uses_the_anchored_path`) would catch
+  the specific mutation tested above, but a subtly different bug — e.g.
+  `model_config` pointing at a *different* wrong-but-absolute path — could
+  satisfy a wiring assertion that only checks "is it `_ENV_FILE`" without
+  ever proving `_ENV_FILE` resolves to a location that actually works from
+  the documented startup directory. The subprocess test proves the real,
+  observable behavior end-to-end at the cost of runtime.
+- This ADR does not re-run mutation testing across the rest of the test
+  suite (`test_health.py`, the frontend tests) — the same failure mode
+  (assert-the-helper-not-the-behavior) could exist elsewhere and hasn't
+  been checked. Flagged here rather than silently assumed fine.

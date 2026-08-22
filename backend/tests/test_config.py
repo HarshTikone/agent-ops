@@ -7,9 +7,17 @@ which is exactly the kind of environment-dependent flakiness a test suite
 must not have (see also tests/conftest.py's `make_client`).
 """
 
+import subprocess
+import sys
 from pathlib import Path
 
+import app as app_package
 from app.config import _ENV_FILE, _REPO_ROOT, Settings
+
+# The real app/ directory's own location — never hardcode this as a relative
+# path from this test file, or the mutation test below would silently start
+# passing against the wrong tree the moment either directory moves.
+REAL_APP_DIR = Path(app_package.__file__).resolve().parent
 
 
 def test_cors_origin_list_splits_and_trims():
@@ -49,7 +57,18 @@ def test_llm_providers_configured_requires_gemini_key():
 
 
 def test_env_file_is_absolute_and_anchored_to_repo_root():
-    """The configured path must not be relative — that's the whole bug."""
+    """The `_ENV_FILE`/`_REPO_ROOT` constants themselves must not be relative.
+
+    NOTE: this only checks the constants exist and are shaped correctly — it
+    does NOT prove `Settings` actually uses them. A mutation that reverts
+    `model_config`'s `env_file=_ENV_FILE` back to the original buggy
+    `env_file=".env"` (while leaving these constants perfectly correct and
+    unused) passes this test. That mutation is exactly what regressed once
+    already; see `test_model_config_actually_uses_the_anchored_path` and
+    `test_settings_reads_repo_root_env_when_started_from_backend` below for
+    the tests that actually catch it — this one is kept only as a cheap
+    shape check on the constants in isolation.
+    """
     assert _ENV_FILE.is_absolute()
 
     independently_computed_root = Path(__file__).resolve().parents[2]
@@ -57,19 +76,70 @@ def test_env_file_is_absolute_and_anchored_to_repo_root():
     assert independently_computed_root / ".env" == _ENV_FILE
 
 
-def test_settings_loads_real_env_file_regardless_of_cwd(tmp_path, monkeypatch):
-    """The actual regression: construct Settings from a directory that has
-    no .env of its own, and confirm it still finds the *module-anchored*
-    file rather than looking relative to CWD (which would find nothing here,
-    silently, exactly like the original bug).
+def test_model_config_actually_uses_the_anchored_path():
+    """The wiring assertion the constant-only test above can't provide:
+    `Settings.model_config["env_file"]` — what pydantic-settings actually
+    reads at construction time — must literally be `_ENV_FILE`, not merely
+    "some absolute path" or (the regressed state) the original relative
+    `".env"` string sitting unused next to a correct constant.
+    """
+    configured = Settings.model_config["env_file"]
+    assert Path(configured).is_absolute()
+    assert Path(configured) == _ENV_FILE
 
-    Uses an explicit tmp .env (not the developer's real root .env) so this
-    stays deterministic on any machine, matching this file's own convention.
+
+def test_settings_reads_repo_root_env_when_started_from_backend(tmp_path):
+    """End-to-end proof of the actual regression, in a throwaway repo copy
+    so it never reads or writes the developer's real `.env`.
+
+    Mirrors production's directory shape exactly (a `.env` at the repo root,
+    the app one level under a `backend/` directory) by copying the real
+    `app/` package into a fresh `<tmp>/repo/backend/app` and writing a fake
+    `.env` at `<tmp>/repo/.env` — then imports `Settings` fresh in a
+    subprocess run with CWD set to the fake `backend/`, exactly matching how
+    `uvicorn` is actually started per the README. If `env_file` is ever
+    relative again, this subprocess resolves it against the fake `backend/`
+    CWD, finds nothing there, and `gemini_api_key` comes back `""` instead of
+    the value below — failing this assertion.
+    """
+    import shutil
+
+    fake_repo_root = tmp_path / "repo"
+    fake_backend = fake_repo_root / "backend"
+    fake_backend.mkdir(parents=True)
+    shutil.copytree(
+        REAL_APP_DIR, fake_backend / "app", ignore=shutil.ignore_patterns("__pycache__")
+    )
+    (fake_repo_root / ".env").write_text("GEMINI_API_KEY=from-fake-repo-root\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-c", "from app.config import Settings; print(Settings().gemini_api_key)"],
+        cwd=fake_backend,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == "from-fake-repo-root"
+
+
+def test_settings_loads_an_explicit_env_file_path_regardless_of_cwd(tmp_path, monkeypatch):
+    """Component-level check of pydantic-settings' own loading mechanism:
+    given an absolute `_env_file` override, it reads that exact file even
+    when CWD points elsewhere.
+
+    This does NOT exercise config.py's CWD-independence fix — passing
+    `_env_file=fake_env` explicitly bypasses `model_config`'s `env_file`
+    entirely, so this test passes identically against the original buggy
+    code. It stays here as a check on the underlying library behavior our
+    fix depends on, not as regression coverage for the bug itself (that's
+    `test_model_config_actually_uses_the_anchored_path` and
+    `test_settings_reads_repo_root_env_when_started_from_backend` above).
     """
     fake_env = tmp_path / "fake_repo_root.env"
     fake_env.write_text("GEMINI_API_KEY=from-fake-env-file\n", encoding="utf-8")
 
-    monkeypatch.chdir(tmp_path)  # simulates running uvicorn from backend/
+    monkeypatch.chdir(tmp_path)
     settings = Settings(_env_file=fake_env)
 
     assert settings.gemini_api_key == "from-fake-env-file"
