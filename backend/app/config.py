@@ -9,10 +9,22 @@ error three layers deep during a real request.
 """
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# pydantic-settings resolves a relative env_file against the process's CWD,
+# not the repo root, and doesn't walk up parent directories. Our local-dev
+# flow runs uvicorn from backend/ while .env lives at the repo root (README's
+# `cp ../.env.example ../.env`), so a relative ".env" here silently missed it
+# — every field has a "" default, so the miss was never an error, just a
+# fully-unconfigured app that looked configured. Anchoring to this file's own
+# location makes the lookup independent of whatever directory the process
+# happens to be started from.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_ENV_FILE = _REPO_ROOT / ".env"
 
 
 class Settings(BaseSettings):
@@ -23,7 +35,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,

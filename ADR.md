@@ -240,3 +240,85 @@ endpoint rather than replacing the whole client — the live `/models` query
 used for ADR-002 above was already done this way (raw `httpx`/`curl`, not the
 SDK), and that pattern is reusable in the app's build/startup path if a
 runtime re-check is added later.
+
+---
+
+## ADR-006: `Settings.env_file` anchored to repo root by path, not by CWD
+
+**Date:** 2026-08-22 (post-Day 1 fix)
+
+**Context**
+
+`backend/app/config.py` originally set `SettingsConfigDict(env_file=".env")`.
+pydantic-settings resolves a relative `env_file` against the process's
+current working directory at `Settings()` construction time — it does not
+search parent directories the way, say, `git` or a `.editorconfig` resolver
+would. README's own documented local-dev flow is `cd backend` followed by
+`cp ../.env.example ../.env` (creating `.env` at the repo root) and then
+`uvicorn app.main:app --reload` (CWD = `backend/`). Under that flow the
+relative `".env"` resolved to `backend/.env`, which never existed, so the
+app silently read nothing.
+
+This was invisible rather than a crash: every `Settings` field defaults to
+`""`, so a fully-unconfigured `Settings()` is valid and constructs without
+error. `/health/ready` — the endpoint whose entire job (per ADR/Day 1 design)
+is to make exactly this kind of misconfiguration loud — reported
+`not_ready` with every check `false`, which reads identically to "you
+haven't filled in `.env` yet" and to "the app can't find the `.env` you did
+fill in." A developer following the README exactly as written would hit
+this every time.
+
+**Decision:** compute the env file path once at module import time, anchored
+to `config.py`'s own file location rather than the caller's CWD:
+
+```python
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_ENV_FILE = _REPO_ROOT / ".env"
+```
+
+and pass `env_file=_ENV_FILE` (an absolute `Path`, not a string) into
+`SettingsConfigDict`. This makes `.env` discovery independent of whatever
+directory a process happens to be started from — `uvicorn` from `backend/`,
+`pytest` from `backend/`, or a hypothetical future entrypoint from the repo
+root all resolve to the same file.
+
+Verified:
+- `parents[2]` from `backend/app/config.py` is genuinely the repo root —
+  computed directly (`python -c "print(Path(...).resolve().parents[2])"`)
+  rather than assumed, since an off-by-one here silently reintroduces the
+  same bug one directory over.
+- The documented README flow now works end-to-end: booted `uvicorn` from
+  `backend/` against a fully-populated root `.env` and confirmed
+  `/health/ready` returns `{"status": "ready", ...}` with all four checks
+  `true` (previously all `false`).
+- The deployment shape (no `.env` file anywhere, config from the platform's
+  real environment variables — Render/Vercel) still works: booted the app
+  with `.env` temporarily moved aside and config passed as real env vars;
+  no error, `/health/ready` still reports `ready`. An `env_file` pointing at
+  a path that doesn't exist is a no-op in pydantic-settings, not an error.
+- Test-suite determinism is unaffected: `Settings(_env_file=None)` (used
+  throughout `tests/` and in `conftest.py`'s `make_client`) still means
+  "ignore any `.env` entirely," confirmed against a machine with a fully
+  populated real root `.env` — and explicit keyword overrides still take
+  precedence over both the dotenv source and defaults.
+
+**What we gave up**
+
+- `config.py` now has an opinion about the repo's directory shape
+  (`backend/app/` sitting exactly two levels under the repo root) baked in
+  as a magic index (`parents[2]`). If `config.py` ever moves to a different
+  depth, this silently points at the wrong file again — the same failure
+  mode this ADR fixes, one refactor later. Mitigated only by the new
+  regression test asserting the resolved path's shape (`tests/test_config.py`
+  independently recomputes the expected root from its own file location
+  rather than importing config.py's arithmetic, so the two can't drift
+  together undetected) — there is no compile-time guarantee, only a test
+  that must be kept passing.
+- A more conventional fix would be an explicit `ENV_FILE` environment
+  variable or a CLI flag, letting the deployer/developer state the path
+  rather than the code inferring it from its own location. That would be
+  more explicit but adds a setup step this project's free-tier/solo-dev
+  context doesn't need — Render and Vercel never use a `.env` file at all
+  (real platform env vars), and the only place this mattered was local dev,
+  where "just works regardless of which directory you're in" is worth more
+  than explicitness.
