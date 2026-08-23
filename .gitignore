@@ -2,6 +2,9 @@
 .env.*
 !.env.example
 
+# Local scratch — personal convenience files with no value to a repo reader
+claude.txt
+
 # Python
 __pycache__/
 *.py[cod]
