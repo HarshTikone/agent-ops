@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     openrouter_api_key: str = Field(default="", description="Fallback provider key")
     openrouter_model: str = Field(default="")
 
+    # --- Tools (Day 2) -----------------------------------------------------
+    tavily_api_key: str = Field(default="", description="Web search tool provider key")
+
     # --- Database / memory / trace log (Supabase) -------------------------
     supabase_url: str = Field(default="")
     supabase_secret_key: str = Field(default="")
