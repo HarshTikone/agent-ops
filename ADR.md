@@ -581,3 +581,376 @@ tell "still fully functional" from "broken" without reading the text.
   endpoint... to fail a session creation early") — this ADR is what
   actually wires that intent in, closing the gap where it was defined but
   never called.
+
+---
+
+## ADR-010: LLM provider client implementation — LangChain chat models, with a verified per-provider exception-translation boundary
+
+**Date:** 2026-08-23 (Day 2)
+
+**Context**
+
+ADR-002 committed to one `LLMProvider` interface with `GeminiProvider` and
+`OpenRouterProvider` behind it, and a `FailoverProvider` that catches
+"timeout/5xx/rate-limit ... not blanket `except Exception`." ADR-002 didn't
+specify how each provider's exceptions get translated into that narrow set —
+that had to be verified against the actual pinned packages
+(`langchain-google-genai` 4.3.5, `langchain-openai` 1.6.0, ADR-004), not
+assumed from either package's older APIs or from training data.
+
+**What was verified, directly, before writing any translation code:**
+
+Both packages are built on `langchain_core.exceptions`' unified `ModelError`
+hierarchy (`ModelTimeoutError`, `ModelRateLimitError`, `ModelAPIError`,
+`ModelConnectionError`, `ModelAuthenticationError`, `ModelPermissionDeniedError`,
+`ModelInvalidRequestError`, `ModelNotFoundError`, `ContextOverflowError`) —
+read directly out of each package's source
+(`langchain_openai/chat_models/base.py`, `langchain_google_genai/chat_models.py`),
+not inferred. But the two packages don't map to it identically:
+
+- **OpenRouter** (`langchain-openai`'s `ChatOpenAI`, pointed at OpenRouter's
+  base URL per ADR-005): multiple-inherits its exception classes from both
+  the OpenAI SDK's own type *and* the matching `ModelError` type — e.g.
+  `class OpenAITimeoutError(openai.APITimeoutError, ModelTimeoutError)`. All
+  four transient shapes (timeout, rate-limit, 5xx, connection failure) are
+  normalized this way.
+- **Gemini** (`langchain-google-genai`'s `ChatGoogleGenerativeAI`): only
+  normalizes rate-limit (`GoogleRateLimitError` → `ModelRateLimitError`) and
+  5xx (`GoogleAPIError` → `ModelAPIError`) — confirmed by reading
+  `_CLIENT_ERROR_TYPES` and `_handle_server_error` directly. A genuine
+  network timeout or connection failure is **not** wrapped; it surfaces as a
+  raw `httpx.TimeoutException` / `httpx.ConnectError`, because those errors
+  happen below the layer that does the status-code-based translation.
+
+**Decision:** each provider implements its own `except` clauses, tailored to
+what its underlying package actually raises, rather than sharing one generic
+translation function:
+
+- `GeminiProvider` catches `ModelRateLimitError` → `ProviderRateLimitError`,
+  `ModelAPIError` → `ProviderServerError`, and
+  `(httpx.TimeoutException, httpx.ConnectError)` → `ProviderTimeoutError`.
+- `OpenRouterProvider` catches `ModelRateLimitError` → `ProviderRateLimitError`,
+  `ModelAPIError` → `ProviderServerError`, and
+  `(ModelTimeoutError, ModelConnectionError)` → `ProviderTimeoutError`.
+- Both `max_retries=0` on the underlying client — the SDK's own internal
+  retry loop (6 attempts by default for Gemini) would otherwise hide a
+  transient failure from `FailoverProvider` for all of them before ever
+  raising, making the failover far slower than the failure actually needed
+  and undermining the retry-count assumptions ADR-012's bounds are built on.
+- Everything else (`ModelAuthenticationError`, `ModelPermissionDeniedError`,
+  `ModelInvalidRequestError`, `ModelNotFoundError`, or any exception outside
+  this list) is not caught by either provider and propagates unchanged — the
+  ADR-002/ADR-009 guarantee that a missing/invalid key can never look
+  failover-eligible. Verified directly:
+  `test_gemini_provider_does_not_translate_auth_errors` and
+  `test_openrouter_provider_does_not_translate_auth_errors`
+  (`tests/test_llm_providers.py`) construct a `ModelAuthenticationError` and
+  assert it comes back out unchanged, not wrapped or swallowed.
+
+`ChatOpenAI`/`ChatGoogleGenerativeAI`'s own `.bind_tools()` and normalized
+`.tool_calls` are used as-is (not hand-rolled) — this is what absorbs
+Gemini's and OpenAI's different native function-calling JSON schemas behind
+one interface, which ADR-002's "what we gave up" section flagged as real
+work; LangChain had already done it at the pinned versions.
+
+**What we gave up**
+
+- Two different `except` clauses per provider, instead of one shared
+  translation function, is more code to keep in sync if a future
+  `langchain-google-genai` release starts normalizing timeouts too (at which
+  point `GeminiProvider`'s httpx-catching branch becomes dead code, not
+  wrong code — a version bump could silently make it superfluous without
+  any test failing to say so).
+- Both providers' `except` blocks are only as narrow as this ADR's
+  verification against *these exact pinned versions* — a version bump to
+  either package needs the same read-the-source verification repeated, not
+  assumed to still hold. `tests/test_llm_providers.py` pins behavior, not
+  the underlying package version; nothing fails loudly on a version bump
+  that quietly changes which exception a given failure raises.
+
+---
+
+## ADR-011: Day 2 tool choices — Tavily for web search, an AST calculator over code-exec
+
+**Date:** 2026-08-23 (Day 2)
+
+**Context**
+
+ARCHITECTURE.md §2 names the three Day 2 tools without picking concrete
+implementations: web search (must be free-tier, no card), and calculator-
+or-code-exec for the third. Both needed a live-verified choice, not a
+memory-based one, per this project's established method (ADR-002).
+
+**Web search: Tavily**
+
+Queried live (`WebSearch`, then cross-checked against Tavily's own docs
+directly, not the aggregator SEO content mixed into the search results —
+several results, e.g. from generic "best free API" roundup sites, weren't
+trustworthy as a primary source on their own, per the same standard ADR-002
+applied to Gemini-vs-blog-aggregator content). Confirmed straight from
+`docs.tavily.com`: 1,000 free credits/month, no card, 1 credit per basic
+search, 100 requests/min on a free "Development" key. Auth is a bearer
+header (`Authorization: Bearer tvly-...`) — verified directly, since the
+older convention (an `api_key` body field, which is what a first draft of
+`WebSearchTool` used) is not how the current API actually authenticates and
+would have failed on the very first live call.
+
+Added to the free-tier table (extending ADR-003's, not editing it):
+
+| Platform | Verified term | Design implication |
+|---|---|---|
+| Tavily | Free "Development" key: 1,000 credits/month, 100 req/min, no card; 1 credit per basic search. | 1,000/month is generous relative to OpenRouter's 50/day — no special "reserve for tests only" discipline needed for web search the way ADR-003 requires for OpenRouter, though the test suite still mocks it (see "what we gave up" below). |
+
+Verified live end-to-end (not just via the mocked test suite): a real
+`POST https://api.tavily.com/search` call against the actual account key
+returned real, on-topic results matching the exact response shape
+`WebSearchTool` parses (`results[].title/url/content`).
+
+**Calculator over code-exec**
+
+Chose the calculator, not a code-execution tool, for the third slot.
+Code-exec is more impressive to point at in an interview, but it means
+running LLM-generated code — that needs a real sandbox (a subprocess with
+resource/network limits, or a per-call container) to be safe to expose on a
+public Render URL where anyone can submit a task. Building and verifying
+that sandbox properly is a multi-day concern on its own, not a Day 2 slot;
+doing it badly (e.g. `exec()` in-process with a naive blocklist) would be
+worse than not having the feature, since a blocklist is trivially bypassable
+and this app has no auth gate in front of it yet (that's Day 3+).
+
+Implemented `CalculatorTool` as an AST walker over `ast.parse(expr,
+mode="eval")`, allowing only numeric literals, the arithmetic operators, and
+a four-function allow-list (`abs`, `round`, `min`, `max`) — not `eval()`.
+`tests/test_tools_calculator.py::test_disallowed_expression_elements_are_rejected`
+is parametrized directly with injection-shaped inputs
+(`__import__('os').system(...)`, `open('/etc/passwd').read()`,
+`[].__class__.__base__.__subclasses__()`) specifically so the test fails
+loudly if a future "simplification" swaps the AST walker back for `eval()`.
+
+**What we gave up**
+
+- Tavily's free tier is generous enough that `test_tools_web_search.py`
+  could arguably have made a small number of real calls in CI without
+  meaningfully touching the 1,000/month budget — mocked anyway, for
+  consistency with the OpenRouter discipline (ADR-003) and so CI behavior
+  never depends on Tavily's uptime or the account's remaining credits.
+- No code-exec tool this project. If Day 5+ hardening adds real per-session
+  sandboxing infrastructure for other reasons, revisiting this with its own
+  ADR is reasonable — but that's a deliberate future decision, not an
+  oversight here.
+- The calculator's function allow-list (`abs`/`round`/`min`/`max`) is
+  arbitrary and small. Extending it means auditing each new function for
+  whether it can be abused to leak information or misbehave on adversarial
+  input (e.g. `round()` with a huge second argument) — not a rubber stamp.
+
+---
+
+## ADR-012: `decide_next` — retry vs. re-plan vs. give-up, and the bounds on each
+
+**Date:** 2026-08-23 (Day 2)
+
+**Context**
+
+ARCHITECTURE.md §2/§4 says `decide_next` "decides whether to proceed... 
+re-plan..., retry..., or request human approval" but doesn't specify how it
+tells "retry" apart from "re-plan," or what stops either from looping
+forever. The brief calls this out directly as the project's single most
+interview-relevant piece of logic and explicitly warns against it becoming
+"an implicit if-chain nobody can explain."
+
+**Decision: the tool adapter, not the graph, classifies its own failure.**
+
+`ToolError(message, *, transient: bool)` is the only exception a tool
+adapter is allowed to raise (mirroring `LLMProvider`'s narrow
+`TransientProviderError` split, ADR-002/ADR-010, applied to tools). The
+adapter that raised it is in the best position to know which shape its own
+failure is: a `web_search` network timeout is obviously transient; a
+`calculator` `SyntaxError` on a malformed expression is obviously not —
+retrying the *exact same* bad expression will fail identically every time,
+so retrying it is wasted budget. `decide_next_node` never inspects an
+exception itself; it only reads the `transient` flag `tool_call_node`
+already recorded in state.
+
+**Decision: three independent bounds, checked in this priority order**
+(`app/graph/limits.py`):
+
+1. `MAX_TOOL_CALLS = 10` — a hard ceiling across the *whole run*, checked
+   first, regardless of the other two counters. The backstop against a
+   pathological loop, not the primary control.
+2. `MAX_STEP_RETRIES = 2` — a transiently-failing step gets up to 2 extra
+   attempts (3 total) before its failure is treated as un-retryable.
+3. `MAX_REPLANS = 1` — the whole run gets one trip back to the planner
+   before a further failure means giving up outright.
+
+**Decision: the actual routing table**, given the current step's outcome:
+
+- Step succeeded, more steps remain → advance to the next step (`delegate`).
+- Step succeeded, plan exhausted → `finalize` (synthesize the answer).
+- Step failed, `transient=True` and under the retry budget → retry the
+  *same* step (`delegate` again, same plan index).
+- Step failed, `transient=False`, OR transient but retry budget spent, AND
+  the re-plan budget isn't spent → re-plan: go back to `planner` with a new
+  `HumanMessage` describing what failed and why, so the LLM sees the
+  failure as real conversation context, not a silent retry.
+- Step failed and the re-plan budget is also spent → give up: `status =
+  "failed"`, a `final_answer` stating what couldn't be completed. Never a
+  crash, never a silently truncated run.
+- An unknown tool name in the plan (the planner selected something not in
+  the registry) is treated as a `transient=False` step failure through the
+  exact same path — a wrong tool-selection decision re-plans, it doesn't
+  crash the graph. `tests/test_graph_decide_next.py::test_unknown_tool_selection_is_treated_as_a_permanent_failure_and_replans`
+  covers this directly.
+
+Verified against the compiled graph (not just the routing function in
+isolation) in `tests/test_graph_decide_next.py`: a pure-retry run (fails
+once, transient, then succeeds — planner called exactly once), a
+pure-re-plan run (fails once, permanent, re-plans onto a different tool —
+re-plan's `HumanMessage` context asserted present in the actual LLM call the
+re-plan makes), a full escalation run (retries exhaust, re-plan happens,
+the *new* step also keeps failing, re-plan budget is spent → give up — with
+an explicit assertion that this gives up on the re-plan budget and not the
+hard cap, since both could plausibly trigger), and the hard-cap run
+in isolation (an 11-step all-succeeding plan stops at exactly 10 tool
+calls). See ADR-013 for the live run against real Gemini exercising the
+retry and re-plan paths end to end, and the two real bugs that live run
+caught which none of these mocked/scripted tests did.
+
+**What we gave up**
+
+- `MAX_STEP_RETRIES = 2` and `MAX_REPLANS = 1` are judgment calls, not
+  measured numbers — there's no production traffic yet to tune them against.
+  A more sophisticated policy (e.g. exponential backoff between retries, or
+  scaling the re-plan budget with plan length) is deferred; these are the
+  simplest bounds that satisfy "an agent loop with no cap can burn a day's
+  quota" without adding complexity Day 2 doesn't need yet.
+- A step that fails permanently on its very first attempt still "wastes" one
+  full re-plan's LLM call before giving up, even though retrying was never
+  going to help — the alternative (skip straight to give-up on certain
+  failure types) would need a *second* classification dimension beyond
+  transient/permanent ("is this worth re-planning around at all"), which is
+  more machinery than Day 2's three-tool, single-session scope justifies.
+- Day 3's real approval state machine and Day 5's rate limiting are separate
+  concerns from these bounds — `MAX_TOOL_CALLS` protects a single run's
+  quota spend, not the account-wide OpenRouter/Gemini budget across
+  concurrent sessions, which Day 5 owns.
+
+---
+
+## ADR-013: Live-verification findings — two real bugs no mocked test caught, plus mutation-test evidence
+
+**Date:** 2026-08-23 (Day 2)
+
+**Context**
+
+Per this project's Day 2 instructions and ADR-007's standing lesson ("a test
+that passes after a fix is not evidence it would fail against the bug it
+claims to prevent"), every mocked test in this day's suite was
+mutation-tested, and the graph was run end to end against the real Gemini
+API — including a forced tool failure — before being called done. The live
+runs surfaced two real bugs that 85 passing mocked/scripted tests had not
+caught, because none of them happened to construct the exact message shapes
+a real Gemini call produces.
+
+**Bug 1 — `AIMessage.content` is not always a `str`.**
+
+`llm_response_from_ai_message` originally did
+`content = ai_message.content if isinstance(ai_message.content, str) else str(ai_message.content)`.
+A live call against `gemini-3.1-flash-lite` returned `.content` as a list of
+content blocks (`[{"type": "text", "text": "47 times 89 is 4,183.", "extras":
+{"signature": "..."}}]`), not a plain string — so the `else` branch fired
+and `final_answer` came back as a stringified Python list
+(`"[{'type': 'text', 'text': '47 times 89 is 4,183.', 'extras': {...}}]"`)
+instead of the answer. No exception was raised; `status` was still `"done"`.
+Every existing test constructed `AIMessage(content="plain string")` by hand,
+so none exercised this shape. Fixed by using `AIMessage.text` (a `str`
+subclass LangChain provides specifically to normalize both the plain-string
+and content-block shapes) instead of hand-checking `.content`'s type.
+`tests/test_llm_base.py::test_extracts_plain_text_from_gemini_style_content_blocks`
+reproduces the exact real shape and was mutation-verified: reverting to the
+original `isinstance`/`str()` line turns it red with the exact malformed
+output the live run produced, confirming this test would have caught the
+original bug had it existed before the live run found it. Reverted back to
+the `.text`-based fix, confirmed green (85 passed).
+
+**Bug 2 — retrying a step appended a second `ToolMessage` for the same `tool_call_id`.**
+
+The first live failure-path run (calculator fails transiently once, retries,
+succeeds) produced a *correct* trace and `status: "done"` but an **empty**
+`final_answer`, with no error logged anywhere. `observe_node` appended a
+`ToolMessage` on every observation, including the failed attempt — so a
+retried step left two `ToolMessage`s in history both claiming to answer the
+same `tool_call_id` from the single `AIMessage` that requested it once. This
+is an invalid tool-calling message sequence; the Gemini API accepted it
+(`200 OK`) but answered `finalize`'s synthesis call with empty content
+instead of erroring, so nothing in the code raised or logged a failure.
+Reproduced directly (not just inferred) by hand-constructing that exact
+message sequence and calling `GeminiProvider.generate` on it. Fixed by
+having `observe_node` drop any existing `ToolMessage` for the current step's
+`tool_call_id` before appending the new one — replacing the stale attempt's
+result rather than accumulating both.
+`tests/test_graph_observe.py::test_retry_replaces_the_stale_tool_message_instead_of_duplicating_it`
+covers it directly and was mutation-verified the same way (revert to
+appending unconditionally → red, naming exactly that test → revert back →
+green, 85 passed). Re-ran the live retry scenario after the fix:
+`final_answer: "47 times 89 is 4,183."` — correct.
+
+**Mutation-test evidence for the tests this ADR's own reasoning depends on**
+(per ADR-007's standard — a test file cannot prove itself trustworthy from
+inside itself):
+
+- `tests/test_llm_failover.py`: mutating `FailoverProvider` to swallow the
+  primary's transient error and fabricate a response (never calling the
+  fallback) turned exactly 5 of 7 tests red, by name
+  (`test_transient_primary_failure_falls_over_to_fallback` x3,
+  `test_fallback_failure_propagates_without_a_second_retry`,
+  `test_messages_and_tools_are_forwarded_unchanged_to_the_fallback`) — the 2
+  that stayed green were the ones that don't involve a transient failure at
+  all, exactly as expected. Separately, mutating the `except` clause to a
+  blanket `except Exception` (violating ADR-002's narrow-catching
+  requirement) turned exactly 1 test red —
+  `test_non_transient_primary_failure_is_not_caught_and_fallback_is_never_called`
+  — confirming that specific guarantee has real coverage, not just the
+  happy path. Reverted both mutations; confirmed clean diff and 7/7 green.
+- `tests/test_graph_tool_selection.py`: mutating `tool_call_node` to always
+  resolve `"calculator"` regardless of the plan step's actual tool name
+  turned 3 of 5 tests red (`[web_search-...]`, `[notes_store-...]`, and
+  `test_multi_step_plan_invokes_each_tool_in_order`) — the calculator case
+  stayed green by coincidence (it already resolved to calculator), exactly
+  as expected. This mutation exercise also caught a real, unrelated wiring
+  bug independent of the test's own logic: `build_graph`'s
+  `add_conditional_edges` `path_map` for `decide_next` was keyed on the
+  pre-translation `next_action` labels ("advance", "retry", "replan") when
+  `route_after_decide` actually returns already-translated node names — a
+  `KeyError: 'delegate'` on the very first multi-step plan, caught by
+  `test_multi_step_plan_invokes_each_tool_in_order` before any mutation was
+  even applied. Fixed the `path_map` to key on the actual node names.
+  Reverted the deliberate mutation after; confirmed clean diff and 5/5
+  green.
+
+**Decision:** treat a real end-to-end run as a required gate for any graph
+change that touches message-history construction, not just an optional
+sanity check — the two bugs above both involved LangChain message-object
+shapes (`AIMessage.content`'s type, valid tool-call/tool-response pairing)
+that are straightforward to get subtly wrong by hand and that a
+scripted/mocked `LLMResponse` test double cannot catch by construction,
+since the test double never constructs a real `AIMessage` at all.
+
+**What we gave up**
+
+- Both live runs cost real Gemini API calls (free tier, not rate-limited
+  today, so no budget concern) but are not part of CI — they're manual,
+  run-and-paste-the-output verification, same as ADR-006's original
+  end-to-end check. Nothing currently *enforces* that a future graph change
+  re-runs this gate; it's a documented discipline, not a CI gate. Automating
+  a real-API smoke test in CI is a real option but was ruled out for now —
+  it would either burn API quota on every push or need to be marked
+  allowed-to-skip, undermining its value as a gate.
+  Zero real OpenRouter calls were needed for this ADR's verification (both
+  live bugs were found via Gemini calls) — combined with the one OpenRouter
+  call spent on this morning's model-liveness check, Day 2 used 1 of the
+  50/day OpenRouter budget.
+- Mutation testing here, as in ADR-007, is a manual practice applied to this
+  day's new tests — nothing automatically re-runs it if these tests are
+  later modified. A test edited after today could silently regress to
+  "passes but doesn't test anything" without anyone noticing, the same gap
+  ADR-007 flagged and didn't close either.

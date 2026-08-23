@@ -193,3 +193,33 @@ for context that later gets pruned from the active memory window.
 - **Secrets** never enter the frontend bundle or a committed file — only
   `backend/` reads `GEMINI_API_KEY` / `OPENROUTER_API_KEY` /
   `SUPABASE_SERVICE_KEY`; the frontend only ever talks to our own backend.
+
+## 7. Day 2 amendments — what actually got built
+
+Per this document's own header: amended below, not rewritten above. Two
+places where the real code (`backend/app/llm/`, `backend/app/tools/`,
+`backend/app/graph/`) differs from Day 1's design, plus what's unchanged.
+
+**A sixth node, `finalize`, was added.** §2/§3 describe five node types.
+Once a plan's steps all succeed, something has to turn the raw tool outputs
+into a natural-language answer — `finalize` makes one more LLM call (no
+tools bound) over the full message history and produces `final_answer`.
+When the planner's first LLM call needs no tool at all, the graph routes
+straight to `END` instead — `finalize` is skipped, since the planner's own
+answer already *is* the final answer.
+
+**`decide_next` is a node plus a router, not a bare conditional function.**
+LangGraph's conditional edges can only return a next-node name — they can't
+themselves mutate state. So `decide_next_node` is a real node that computes
+the retry/replan/give-up decision *and* writes it into `state["next_action"]`
+plus whatever counters that decision implies (`step_index`, `step_attempts`,
+`replans`); a one-line `route_after_decide` immediately after just reads
+`next_action` back out. See ADR-012 for the decision logic itself.
+
+**Everything else matches the design as written:** the `LLMProvider`
+interface and `FailoverProvider` composition (§2, ADR-002, and now ADR-010
+for the concrete exception-translation mechanics), the uniform tool-adapter
+interface (§2), tool failures caught and logged at the tool-call boundary
+and never crossing it raw (§6), and graph state staying in-memory for Day 2
+(§2's Day 3 note) — `app/graph/state.py`'s `trace` list is exactly the
+lightweight stand-in for the real `trace_events` table described there.
