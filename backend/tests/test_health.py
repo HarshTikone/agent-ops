@@ -57,6 +57,45 @@ def test_readiness_partial_config_is_not_ready(make_client):
     assert body["checks"]["supabase_configured"] is False
 
 
+def test_readiness_degraded_when_openrouter_missing_but_can_serve(make_client):
+    """Per ADR-009: Gemini + Supabase + database present but no OpenRouter
+    key means the system can serve every request — it just has no failover
+    if Gemini has an outage mid-session. That's "degraded", not "not_ready":
+    conflating "can't serve" with "no safety net" would make every demo
+    deploy report broken over a resilience feature that hasn't fired yet.
+    """
+    client = make_client(
+        gemini_api_key="test-key",
+        supabase_url="https://example.supabase.co",
+        supabase_secret_key="sb_secret_test",
+        database_url="postgresql://user:pass@localhost:5432/db",
+    )
+    response = client.get("/health/ready")
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert body["checks"]["openrouter_api_key_set"] is False
+
+
+def test_readiness_not_ready_when_only_openrouter_key_present(make_client):
+    """The other direction of ADR-009's split: OpenRouter is a fallback that
+    (per ADR-002) only fires on a Gemini timeout/5xx/rate-limit — never on a
+    missing/invalid Gemini key, which is deliberately NOT caught as a
+    failover trigger. So an OpenRouter key with no Gemini key cannot serve
+    anything either; this must stay "not_ready", not "degraded".
+    """
+    client = make_client(
+        openrouter_api_key="test-key",
+        supabase_url="https://example.supabase.co",
+        supabase_secret_key="sb_secret_test",
+        database_url="postgresql://user:pass@localhost:5432/db",
+    )
+    response = client.get("/health/ready")
+    body = response.json()
+    assert body["status"] == "not_ready"
+    assert body["checks"]["gemini_api_key_set"] is False
+    assert body["checks"]["openrouter_api_key_set"] is True
+
+
 def test_root_lists_docs_url(client):
     response = client.get("/")
     assert response.status_code == 200

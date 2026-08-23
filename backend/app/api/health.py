@@ -11,6 +11,17 @@ Split into two deliberately different checks:
   the one that should fail loudly in a demo if, say, GEMINI_API_KEY was
   never set on the deploy target — a genuinely observed failure mode
   (missing config) rather than a silent 500 three requests later.
+
+`/health/ready`'s three-way status (see ADR-009) is deliberate: Gemini +
+Supabase + database are hard requirements — without any one of them the
+planner literally cannot do anything (no LLM at all, or nowhere to persist
+a session/trace/approval). OpenRouter is a resilience add-on per ADR-002:
+the failover only fires on Gemini timeout/5xx/rate-limit, never on a missing
+key or auth failure (that's deliberately not caught, so a real config bug
+doesn't masquerade as "provider failed over cleanly") — so an OpenRouter-only
+setup with no Gemini key cannot actually serve anything either, and a
+Gemini-only setup with no OpenRouter key can serve everything, just with no
+safety net if Gemini has an outage mid-demo.
 """
 
 from fastapi import APIRouter, Depends
@@ -33,5 +44,18 @@ def readiness(settings: Settings = Depends(get_settings)) -> dict[str, object]:
         "supabase_configured": bool(settings.supabase_url and settings.supabase_secret_key),
         "database_configured": bool(settings.database_url),
     }
-    ready = all(checks.values())
-    return {"status": "ready" if ready else "not_ready", "checks": checks}
+
+    can_serve = (
+        settings.llm_providers_configured
+        and checks["supabase_configured"]
+        and checks["database_configured"]
+    )
+
+    if not can_serve:
+        status = "not_ready"
+    elif not checks["openrouter_api_key_set"]:
+        status = "degraded"
+    else:
+        status = "ready"
+
+    return {"status": status, "checks": checks}

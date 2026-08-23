@@ -485,3 +485,99 @@ entry is the correction of record. No file changes result from this ADR.
   live source to be *the thing the ADR is actually about*, not a step
   earlier in the pipeline that a later tool (here, `create-vite`'s own
   dependency resolution) can silently override.
+
+---
+
+## ADR-009: `/health/ready` distinguishes "can't serve" from "no failover safety net"
+
+**Date:** 2026-08-22 (post-scaffold correction)
+
+**Context**
+
+`/health/ready` originally computed `ready = all(checks.values())` across
+all four config checks (Gemini key, OpenRouter key, Supabase, database) —
+treating a missing OpenRouter key exactly like a missing Gemini key or a
+missing database connection: any one absent reported the whole deploy
+`not_ready`. Meanwhile `Settings.llm_providers_configured` (Gemini-only)
+existed on the model but was never read by the endpoint.
+
+Per ADR-002, OpenRouter is a fallback that fires *only* on a Gemini
+timeout/5xx/rate-limit — and deliberately not on other failure shapes: the
+`FailoverProvider` catches those specific exceptions so "a genuine bug in
+our own code doesn't get silently masked as a 'provider failure.'" A missing
+or invalid `GEMINI_API_KEY` produces an auth/config error, not a
+timeout/5xx/rate-limit — so it is, by ADR-002's own design, *not* a
+condition the failover catches. Concretely:
+
+- **Gemini + Supabase + database configured, OpenRouter absent:** the system
+  can serve every request end-to-end today. It has no safety net if Gemini
+  has an outage mid-session, but that's a risk, not a current outage.
+- **OpenRouter configured, Gemini absent:** the system can serve *nothing*
+  — the failover path that would reach OpenRouter never triggers for a
+  missing primary key, only for specific primary-call failures.
+
+Treating these identically as "not_ready" conflates "cannot serve a single
+request right now" with "can serve, but is one Gemini outage away from
+having no fallback" — two very different situations a deploy operator needs
+to tell apart at a glance.
+
+**Decision:** three-way `status`, computed from `llm_providers_configured`
+(now wired into the endpoint) plus the Supabase/database checks as the
+hard "can this instance do anything at all" gate, with OpenRouter absence
+downgrading `ready` to `degraded` rather than to `not_ready`:
+
+```python
+can_serve = settings.llm_providers_configured and supabase_configured and database_configured
+status = "not_ready" if not can_serve else ("degraded" if not openrouter_api_key_set else "ready")
+```
+
+- `not_ready`: missing Gemini, Supabase, or the database — cannot serve any
+  request.
+- `degraded`: can serve every request; no OpenRouter fallback configured.
+- `ready`: fully configured.
+
+The `checks` object in the response is unchanged — all four booleans are
+still reported individually, so a deploy operator can still see exactly
+which piece is missing regardless of which bucket `status` falls into.
+
+Verified live (not just via the test suite) by starting the real server
+under three constructed environments with the developer's real root `.env`
+moved aside: Gemini+Supabase+DB set, OpenRouter unset →
+`{"status":"degraded", ...}`; OpenRouter+Supabase+DB set, Gemini unset →
+`{"status":"not_ready", ...}`; and, with the real `.env` restored, the
+actual fully-configured deploy → `{"status":"ready", ...}`. All three match
+the decision table above exactly.
+
+Frontend (`BackendStatus.tsx`) updated to match: `ReadinessResponse.status`
+is now `'ready' | 'degraded' | 'not_ready'`, and the status text renders in
+one of three colors (green / amber / red) via a `Record`-typed lookup keyed
+on the union type itself — so an exhaustiveness check comes for free: adding
+a fourth status value to the type without adding it to `statusColor` is a
+TypeScript error, not a silent fallback to some default color. Previously
+`degraded` and `not_ready` would both have rendered identically in amber,
+which is exactly the "can't tell these apart at a glance" problem this ADR
+exists to fix — a reviewer glancing at a demo deploy showing amber could not
+tell "still fully functional" from "broken" without reading the text.
+
+**What we gave up**
+
+- A simpler binary `ready`/`not_ready` is one less state for every future
+  consumer of this endpoint to handle — Day 5's metrics endpoint and any
+  future uptime-monitor integration now need to decide what to do with
+  `degraded` (probably: page on `not_ready`, just log `degraded`), which is
+  a real design question this ADR is deferring rather than answering.
+- The hard/soft split is a judgment call about ADR-002's failover behavior
+  holding as currently designed. If Day 2's actual implementation ends up
+  catching a broader class of Gemini failures than "timeout/5xx/rate-limit"
+  (e.g. treating a 401 as failover-eligible too, to be more lenient), the
+  premise here — "a missing Gemini key can never be rescued by OpenRouter"
+  — would need re-checking, and this ADR would need a follow-up.
+  `test_readiness_not_ready_when_only_openrouter_key_present` documents the
+  current assumption in a way that a future Day 2 change would need to
+  consciously revisit, but nothing enforces that revisit happening.
+- `llm_providers_configured`'s definition ("Gemini configured" only, per its
+  existing docstring) now doubles as this endpoint's serving gate. It was
+  already documented as intended for exactly this ("Used by the health
+  endpoint... to fail a session creation early") — this ADR is what
+  actually wires that intent in, closing the gap where it was defined but
+  never called.

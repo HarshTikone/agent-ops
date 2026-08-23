@@ -14,8 +14,15 @@ export interface ReadinessChecks {
   database_configured: boolean
 }
 
+/**
+ * Per ADR-009: "ready" (fully configured), "degraded" (Gemini + Supabase +
+ * database all present, so every request can be served — but no OpenRouter
+ * key, so there's no failover safety net if Gemini has an outage), or
+ * "not_ready" (missing something the system cannot serve anything without
+ * at all).
+ */
 export interface ReadinessResponse {
-  status: 'ready' | 'not_ready'
+  status: 'ready' | 'degraded' | 'not_ready'
   checks: ReadinessChecks
 }
 

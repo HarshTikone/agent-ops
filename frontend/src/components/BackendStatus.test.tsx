@@ -17,7 +17,7 @@ describe('BackendStatus', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Checking backend connection')
   })
 
-  it('shows ready with no missing checks when the backend is fully configured', async () => {
+  it('shows ready in green with no missing checks when the backend is fully configured', async () => {
     ;(fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -31,11 +31,34 @@ describe('BackendStatus', () => {
       }),
     })
     render(<BackendStatus />)
-    await waitFor(() => expect(screen.getByText(/Backend status: ready/)).toBeInTheDocument())
+    const statusText = await screen.findByText(/Backend status: ready/)
+    expect(statusText).toHaveClass('text-green-500')
     expect(screen.queryByRole('list')).not.toBeInTheDocument()
   })
 
-  it('lists exactly the missing config keys when partially configured', async () => {
+  it('shows degraded in amber (not red) when only the OpenRouter fallback is unconfigured', async () => {
+    // Per ADR-009: Gemini + Supabase + database present means every request
+    // can still be served — missing only the failover safety net is a
+    // warning, not the same "broken" signal as not_ready.
+    ;(fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        status: 'degraded',
+        checks: {
+          gemini_api_key_set: true,
+          openrouter_api_key_set: false,
+          supabase_configured: true,
+          database_configured: true,
+        },
+      }),
+    })
+    render(<BackendStatus />)
+    const statusText = await screen.findByText(/Backend status: degraded/)
+    expect(statusText).toHaveClass('text-amber-500')
+    expect(screen.getByText('openrouter_api_key_set missing')).toBeInTheDocument()
+  })
+
+  it('shows not_ready in red and lists exactly the missing config keys', async () => {
     ;(fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -49,7 +72,8 @@ describe('BackendStatus', () => {
       }),
     })
     render(<BackendStatus />)
-    await waitFor(() => expect(screen.getByText(/Backend status: not_ready/)).toBeInTheDocument())
+    const statusText = await screen.findByText(/Backend status: not_ready/)
+    expect(statusText).toHaveClass('text-red-500')
     expect(screen.getByText('openrouter_api_key_set missing')).toBeInTheDocument()
     expect(screen.getByText('supabase_configured missing')).toBeInTheDocument()
     expect(screen.queryByText(/gemini_api_key_set missing/)).not.toBeInTheDocument()

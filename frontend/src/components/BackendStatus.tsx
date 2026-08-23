@@ -45,11 +45,19 @@ export function BackendStatus() {
 
   const notConfigured = Object.entries(status.data.checks).filter(([, ok]) => !ok)
 
+  // Three-way, not binary: "degraded" can still serve every request (Gemini
+  // + Supabase + database are all present — only the OpenRouter failover
+  // safety net is missing), so it reads as a distinct warning color, not
+  // the same red as a genuinely broken "not_ready" deploy. See ADR-009.
+  const statusColor: Record<typeof status.data.status, string> = {
+    ready: 'text-green-500',
+    degraded: 'text-amber-500',
+    not_ready: 'text-red-500',
+  }
+
   return (
     <div className="text-sm">
-      <p className={status.data.status === 'ready' ? 'text-green-500' : 'text-amber-500'}>
-        Backend status: {status.data.status}
-      </p>
+      <p className={statusColor[status.data.status]}>Backend status: {status.data.status}</p>
       {notConfigured.length > 0 && (
         <ul className="mt-1 list-disc pl-5 text-amber-500">
           {notConfigured.map(([key]) => (
