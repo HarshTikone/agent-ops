@@ -37,6 +37,7 @@ python -m venv .venv
 source .venv/Scripts/activate   # Windows Git Bash; use .venv/bin/activate on macOS/Linux
 pip install -r requirements-dev.txt
 cp ../.env.example ../.env      # fill in real values, see below
+python scripts/migrate.py       # applies backend/migrations/*.sql — run once, and again after any schema change
 uvicorn app.main:app --reload
 ```
 
@@ -44,6 +45,12 @@ Check it's up: `curl http://localhost:8000/health` and
 `curl http://localhost:8000/health/ready` (the second reports which of
 Gemini/OpenRouter/Supabase/DB config is missing, without ever printing a
 secret value).
+
+Sessions, messages, the trace log, and the approval state machine (Day 3)
+live in Postgres — `POST /sessions`, `POST /sessions/{id}/messages`,
+`GET /sessions/{id}/trace`, `POST /approvals/{id}/approve` /
+`.../reject`. See `/docs` for the full schema, or `ADR.md` (ADR-014/015/016)
+for how the approval pause survives across separate requests.
 
 Run checks locally exactly as CI does:
 
@@ -112,11 +119,12 @@ double-check `git status` before pushing if you ever see it listed.
 ## Repo layout
 
 ```
-backend/     FastAPI app, agent graph (Day 2+), tests
-frontend/    React + Vite + Tailwind app, tests
-.github/     CI workflow, issue/PR templates
-ADR.md       Architecture Decision Records — what we chose and gave up
-ARCHITECTURE.md   System design: components, data flow, deployment topology
+backend/            FastAPI app, agent graph, tests
+backend/migrations/ SQL schema, applied by backend/scripts/migrate.py
+frontend/           React + Vite + Tailwind app, tests
+.github/            CI workflow, issue/PR templates
+ADR.md              Architecture Decision Records — what we chose and gave up
+ARCHITECTURE.md     System design: components, data flow, deployment topology
 ```
 
 ## Build log

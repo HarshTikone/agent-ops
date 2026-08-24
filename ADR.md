@@ -954,3 +954,285 @@ since the test double never constructs a real `AIMessage` at all.
   later modified. A test edited after today could silently regress to
   "passes but doesn't test anything" without anyone noticing, the same gap
   ADR-007 flagged and didn't close either.
+
+---
+
+## ADR-014: Persistence architecture — LangGraph's native Postgres checkpointer for graph state, raw psycopg (no ORM) for the hand-designed schema
+
+**Date:** 2026-08-24 (Day 3)
+
+**Context**
+
+ARCHITECTURE.md §3 step 5 requires that a paused approval "literally ends"
+the graph run and is resumed later by a *separate* `POST
+/approvals/{id}/approve` request — not held open in memory. That's a real
+persistence problem: the in-progress plan, message history, retry/replan
+counters, and everything else in `GraphState` has to survive across two
+unrelated HTTP requests, possibly handled by different worker processes.
+
+ADR-001 picked LangGraph specifically citing "built-in persistence/
+checkpointing... human-in-the-loop checkpoints" as the deciding factor over
+CrewAI. Day 3 is the first day that claim gets exercised for real rather
+than staying a design intention.
+
+**Decision (1): use LangGraph's own `interrupt()` / checkpointer mechanism, not a hand-rolled resume.**
+
+Verified live, end to end, against the real Supabase Postgres instance
+*before* writing any application code around it (not assumed from
+documentation): installed `langgraph-checkpoint-postgres` (current PyPI
+version 3.1.2, queried live) and `psycopg[binary]` (see "what we gave up"
+below for why `[binary]`), ran `PostgresSaver.setup()` against the real
+`DATABASE_URL`, confirmed it created its own `checkpoints` /
+`checkpoint_blobs` / `checkpoint_writes` / `checkpoint_migrations` tables,
+then built a throwaway two-node graph with an `interrupt()` call and proved
+the exact pattern Day 3 needs: `compiled.invoke(...)` pauses and returns
+`__interrupt__`; a **second, independently-constructed** `PostgresSaver` +
+compiled graph (simulating a fresh process handling the follow-up HTTP
+request) resumes correctly via `compiled2.invoke(Command(resume=...),
+config=...)`, reading only from the persisted checkpoint. Confirmed working
+with both a bare `psycopg.Connection` and the `psycopg_pool.ConnectionPool`
+the app actually uses (`autocommit=True`, `row_factory=dict_row`).
+
+This validates ADR-001's original justification with real usage rather than
+leaving it a documentation claim — the graph module (`app/graph/`) needed
+zero structural changes to support pausing; `approval_gate_node` (ADR-015)
+is the only node that calls `interrupt()`.
+
+**Decision (2): no ORM for the five hand-designed tables (`sessions`,
+`messages`, `trace_events`, `pending_actions`, `session_memory`).**
+
+`app/repository.py` is raw parameterized SQL via `psycopg`, not SQLAlchemy.
+The query shapes are simple CRUD plus two conditional-update guards (see
+ADR-015); introducing an ORM's session/model/migration machinery for five
+small tables would be more code to maintain than the SQL it would generate.
+SQL migrations live in `backend/migrations/*.sql`, applied by a small
+tracking script (`scripts/migrate.py`, a `schema_migrations` table +
+apply-in-order-once) — deliberately manual, run by a developer (or a future
+Day 6 deploy step), not auto-run on app boot, which would race multiple
+workers migrating concurrently for no benefit at this scale.
+
+This also means the `supabase` Python client package ADR-004 pinned back on
+Day 1 ("Database... wired up starting Day 3") went unused — that package is
+Supabase's REST/Storage/Auth SDK, not a Postgres driver, and everything
+Day 3 needed is direct SQL over the connection string already in
+`DATABASE_URL`. Removed from `requirements.txt` rather than left as a
+dangling unused dependency; correcting the record here rather than editing
+ADR-004's original text, same convention as ADR-008.
+
+**Two real bugs found only by running this against the real database, not
+by any earlier design review:**
+
+1. **`tool_args` silently failed to adapt as `jsonb`.** psycopg3 does not
+   auto-adapt a plain Python `dict` to a `jsonb` column — the first live run
+   of `create_pending_action` raised
+   `psycopg.ProgrammingError: cannot adapt type 'dict'`. Fixed by wrapping
+   with `psycopg.types.json.Jsonb(tool_args)` at the one call site that
+   inserts it. `tests/test_repository.py::test_pending_action_jsonb_args_round_trip`
+   covers this directly with a nested dict, against the real column.
+2. **`ToolCallRequest` (part of checkpointed `GraphState.plan`) triggered
+   `Deserializing unregistered type app.llm.base.ToolCallRequest ... This
+   will be blocked in a future version`.** LangGraph's checkpoint
+   serializer reconstructs custom classes through an allowlist gate for
+   security (arbitrary-class deserialization is the same class of risk as
+   unpickling untrusted data); any class outside its own built-in safe list
+   hits this gate, warn-but-allow by default today. Converting
+   `ToolCallRequest` from a `@dataclass` to a Pydantic v2 `BaseModel`
+   *looked* like the fix (LangChain's own Pydantic-based messages never
+   trigger this warning) but verified directly that it wasn't sufficient by
+   itself — Pydantic v2 models get a distinct wire encoding
+   (`EXT_PYDANTIC_V2`) but go through the *identical* allowlist check on the
+   way back out, confirmed by reading `jsonplus.py`'s `_check_allowed`
+   directly. The actual fix: construct the serializer with
+   `allowed_msgpack_modules=[("app.llm.base", "ToolCallRequest")]` explicitly
+   (`app/graph/serde.py`, `GRAPH_SERDE` — used by every checkpointer
+   construction site, including tests' `InMemorySaver`) . Verified live: the
+   warning is gone from a real end-to-end run after this change, confirmed
+   by re-running the exact same API smoke sequence that first surfaced it.
+   The Pydantic conversion was kept anyway — it's more consistent with the
+   rest of the codebase's value types and is what makes the dedicated
+   `EXT_PYDANTIC_V2` path apply at all, even though the allowlist is what
+   actually silences the warning.
+
+**What we gave up**
+
+- `psycopg[binary]` bundles a compiled `libpq` rather than linking the
+  system one — simpler and more portable (no system `libpq` install step on
+  Windows dev machines or Render's container), at the cost of not picking up
+  OS-level `libpq` security patches automatically. psycopg's own docs flag
+  this as fine for most use cases but not ideal for high-security production
+  deployments; acceptable here given this is a free-tier portfolio deploy,
+  not a scenario the trade-off is designed to warn against.
+- LangGraph's checkpoint tables are keyed by `thread_id` (a plain string,
+  set to `str(session_id)`) with **no foreign key back to `sessions`** —
+  deleting a `sessions` row cascades to its `messages`/`trace_events`/
+  `pending_actions`/`session_memory` children but leaves that session's
+  checkpoint rows orphaned in `checkpoints`/`checkpoint_blobs`/
+  `checkpoint_writes` forever. Caught directly during testing: 191 orphaned
+  rows accumulated in `checkpoints` from test runs before any cleanup
+  existed. Tests now explicitly call `checkpointer.delete_thread(str(session_id))`
+  in teardown; there is no equivalent for real sessions in production yet —
+  no `DELETE /sessions/{id}` endpoint exists (out of Day 3's explicit
+  endpoint list), so a real deploy's checkpoint tables grow unbounded today.
+  Worth real attention before Supabase's 500MB free-tier storage cap becomes
+  a concern (ADR-003) — flagged here rather than silently deferred.
+- Migrations are not run automatically in CI or on deploy — `scripts/migrate.py`
+  was run manually against the shared dev/CI Supabase project for Day 3's
+  schema. A schema change that ships without someone remembering to run it
+  would cause CI's DB-backed tests to fail loudly (a missing column/table is
+  a clear SQL error, not a silent pass) — safe-but-manual, not
+  safe-and-automatic. Revisit if this project ever has more than one
+  contributor or a real staging/prod split.
+- One shared Supabase project for local dev AND CI (`DATABASE_URL` and
+  friends added as GitHub Actions secrets from the same values in the local
+  `.env`) — no isolation between a developer's local test run and CI's.
+  Mitigated by every DB-backed test cleaning up its own rows in a `finally`
+  block (verified: all five application tables plus `checkpoints` read back
+  to 0 rows after a full local test run), and by tests using freshly
+  generated UUIDs so concurrent runs can't collide on identity, but two
+  test suites running at literally the same moment could still see each
+  other's transient state. Acceptable for a solo project at this stage; a
+  real second (CI-only) Supabase project would remove the risk entirely at
+  the cost of a second free-tier project to keep in sync schema-wise.
+
+---
+
+## ADR-015: Human-in-the-loop approval — `pending_actions` as the HTTP-visible source of truth over an `interrupt()`-gated node
+
+**Date:** 2026-08-24 (Day 3)
+
+**Context**
+
+ARCHITECTURE.md §2 requires "a real state machine, not a UI-only gate:
+`pending -> approved -> executed` or `pending -> rejected` (terminal)...
+persisted in Supabase... so the frontend's approval modal is a view onto
+this state, not the source of truth for it." ADR-014 established that
+LangGraph's checkpointer is what makes the graph itself resumable — this
+ADR is about the layer above that: how the HTTP API exposes and drives that
+pause, and what "irreversible" means concretely (ADR-016 covers *which*
+actions).
+
+**Decision: a dedicated `approval_gate` node, separate from `tool_call`.**
+
+`delegate -> approval_gate -> tool_call -> observe -> decide_next`.
+`approval_gate_node` is a no-op pass-through for every step except one that
+needs approval (ADR-016); for those, it calls `interrupt({"tool_name":...,
+"tool_args":..., "step_id":...})` and, on resume, either lets execution
+continue (approved) or sets `last_failure`/`last_failure_transient=False`
+(rejected) so `decide_next` (ADR-012) routes a rejection through the exact
+same re-plan-or-give-up path as any other permanent step failure — no
+separate "what happens after a rejection" logic needed.
+
+This is a separate node rather than a check inside `tool_call_node`
+specifically because of how LangGraph resumes: a node's *entire function
+body* re-runs from the top on resume (only `interrupt()` itself
+short-circuits via the replayed value — nothing about node boundaries is
+checkpointed mid-function). Keeping the gate in its own tiny, idempotent
+node means only that small check re-executes on resume, not `tool_call`'s
+counter increments or `tool.run()` side effects. Verified directly this
+matters, not just in theory: a mutation test (see below) reintroducing the
+alternative (a `last_failure` check inside `tool_call_node` without properly
+resetting it on retry) produced a real bug where a transient-failure retry
+silently never re-ran the tool.
+
+**Decision: `pending_actions` rows are created and resolved by the API
+layer, not the graph.** `tool_call_node`/`approval_gate_node` know nothing
+about Postgres — `app/session_runner.py` is the one place that reads
+`result["__interrupt__"]` after an `.invoke()` call, creates the
+`pending_actions` row from the interrupt payload, and sets
+`sessions.status = 'awaiting_approval'`. `POST /approvals/{id}/approve` and
+`.../reject` look up the row, apply `decide_pending_action` (a
+`WHERE status = 'pending'` guard — a second decide on an already-decided
+row is a 409, not a silent double-apply, verified directly with a
+double-approve test both at the repository layer and through the real API),
+then call `resume_session_run` with `Command(resume=True|False)`.
+`mark_pending_action_executed` fires immediately after a successful
+*approved* resume — "executed" means specifically "the tool this
+pending_action named was attempted," independent of whether the rest of
+that session's run goes on to succeed or fail further down the line.
+
+**Decision: session status lifecycle is `created -> running -> (awaiting_approval <-> running)* -> done | failed`,**
+and `POST /sessions` creates a session with **no task yet** — matching
+ARCHITECTURE.md §3's literal ordering ("User sends a message via `POST
+/sessions/{id}/messages`" as the first real action). The first
+`POST /sessions/{id}/messages` call supplies the task and starts the graph
+(`repo.start_session`, guarded to only succeed from `'created'`); a second
+message to a session that's already running, paused, or finished is a
+clear `409`, not a silent no-op or an implicit new unrelated run — Day 3's
+graph design (ADR-012) is one task, one plan, per session; true multi-turn
+re-planning from a fresh unrelated message is out of scope here (revisit
+Day 4+ if the chat UI needs it).
+
+**Verified live**, both through unit/graph-level tests (`InMemorySaver`,
+scripted LLM and tools — fast, no real infra) and through the real API
+against real Gemini and real Postgres
+(`tests/test_integration_session.py::test_full_session_through_the_real_api_including_approval`):
+create session -> message pauses at `awaiting_approval` with a real
+`pending_actions` row -> a second message is rejected with 409 -> approve
+resumes and completes -> a second approve on the same id is rejected with
+409 -> the note is actually persisted in `session_memory`. Also observed
+live (not scripted): rejecting a pending action and letting the real,
+non-deterministic Gemini re-plan sometimes leads to *another* approval
+pause (the re-plan proposed a different note write) — handled correctly by
+the exact same mechanism with no special-casing, matching
+`tests/test_graph_approval.py::test_two_write_steps_each_pause_independently`'s
+scripted coverage of the same shape.
+
+**What we gave up**
+
+- No endpoint lists a session's pending action(s) directly — a client has
+  to already know the `pending_action_id` (from the interrupt it received,
+  or by reading the trace) to approve/reject it. Day 3's explicit endpoint
+  list doesn't include one; Day 4's approval-modal UI will need to decide
+  whether it wants `GET /sessions/{id}` to embed the current pending action
+  inline, or a new endpoint — deferred rather than guessed at now.
+- A session can pause for approval multiple times across its run (each
+  irreversible step gets its own gate), but there is no cap on how many
+  times a single run can re-plan into *another* approval-requiring step —
+  only `MAX_REPLANS = 1` (ADR-012) bounds total re-plans, which already
+  covers this indirectly, but there's no approval-specific budget separate
+  from that shared one. Not a gap in practice today (one re-plan means at
+  most two approval-worthy attempts total), flagged in case that changes.
+
+---
+
+## ADR-016: What counts as "irreversible" in Day 3's tool set
+
+**Date:** 2026-08-24 (Day 3)
+
+**Context**
+
+ARCHITECTURE.md §3 step 5 gates on "the step is irreversible (e.g. a write
+that can't be undone)" without naming which of Day 2's three tools that
+means. Of the three: `calculator` is pure computation (no side effect at
+all); `web_search` is a read against an external index; `notes_store` has
+one action, `write`, that persists data past the current step — `read` and
+`list` are also reads. `write` is the only genuinely irreversible action in
+today's tool set: a later step (or the user) can't tell the difference
+between "this note was never written" and "it was written and nobody looked
+at it," so an unwanted write is a real, silent state change, unlike an
+unwanted read or computation which simply produced an answer nobody acts on.
+
+**Decision:** a small, explicit table in the graph layer —
+`IRREVERSIBLE_STEPS = {("notes_store", "write")}` (`app/graph/nodes.py`) —
+checked by `(tool_name, arguments["action"])` membership. Not a flag on the
+uniform `Tool` interface (`name`/`description`/`args_schema`/`run` — see
+ARCHITECTURE.md §2 and Day 2's tools). Adding a fifth member to that
+interface for a property exactly one of three tools needs, and only for one
+of its three actions, is more surface than the current tool set justifies.
+
+**What we gave up**
+
+- If a future tool adds its own write/irreversible action, `IRREVERSIBLE_STEPS`
+  needs a manual entry — nothing enforces that a new irreversible action
+  gets approval-gated by construction; forgetting is a silent gap, not a
+  loud error. A per-Tool `irreversible(args) -> bool` method would make this
+  structural instead of a table someone has to remember to update, at the
+  cost of every tool (including the two that never need it) carrying the
+  concept. Revisit if a second tool ever needs write-approval semantics —
+  right now this would be speculative machinery for a single case.
+- `notes_store`'s `write` action is irreversible in the sense that matters
+  here (a silent, unreviewed state change), not in the stronger sense of
+  "cannot be undone by any means" — the note itself can be overwritten by a
+  later write to the same key. The approval gate protects against *an
+  unreviewed write happening at all*, not against notes generally being
+  mutable once written.

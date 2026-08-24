@@ -223,3 +223,54 @@ interface (§2), tool failures caught and logged at the tool-call boundary
 and never crossing it raw (§6), and graph state staying in-memory for Day 2
 (§2's Day 3 note) — `app/graph/state.py`'s `trace` list is exactly the
 lightweight stand-in for the real `trace_events` table described there.
+
+## 8. Day 3 amendments — memory, approval, tracing, and the API
+
+**A seventh node, `approval_gate`, sits between `delegate` and `tool_call`.**
+`delegate -> approval_gate -> tool_call -> observe -> decide_next`. It's a
+no-op pass-through for every step except the one irreversible action in
+Day 3's tool set (`notes_store` with `action="write"` — ADR-016); for that
+one, it's the only node that ever calls LangGraph's `interrupt()`. See
+ADR-015 for why it's a separate node rather than a check inside
+`tool_call`.
+
+**§2's "graph state stays in-memory for Day 2" is now superseded, not just
+extended.** ADR-014 confirms ADR-001's original claim that LangGraph ships
+real checkpointing: `GraphState` (including the full message history, plan,
+and retry/replan counters) is persisted via `PostgresSaver` against the
+real Supabase project, keyed by `thread_id = str(session_id)`. This is what
+makes §3 step 5's "the graph run literally ends, resumed later by a
+separate request" true in practice, not just in the design doc — verified
+live across two independently-constructed `PostgresSaver`/compiled-graph
+instances (simulating two separate HTTP requests) before any application
+code was written around it.
+
+**`sessions.status` gained a `created` state**, ahead of `running`: `POST
+/sessions` creates a session with no task yet; the first
+`POST /sessions/{id}/messages` call supplies it and starts the graph. This
+matches §3 step 1's literal ordering ("User sends a message via `POST
+/sessions/{id}/messages`") — §3 didn't previously spell out that session
+creation has its own separate, task-less step.
+
+**Endpoints match §1's diagram exactly:** `POST /sessions`,
+`GET /sessions/{id}`, `POST /sessions/{id}/messages`,
+`GET /sessions/{id}/trace`, `POST /approvals/{id}/approve`,
+`POST /approvals/{id}/reject`. No session-listing or pending-action-listing
+endpoint yet (ADR-015's "what we gave up" — deferred to Day 4 once the UI
+shape is known).
+
+**`session_memory` has no `embedding` column yet.** §2 describes it as
+"session_memory table (plus pgvector embeddings column for any semantic
+recall the agents need)" — the `vector` extension is enabled
+(`CREATE EXTENSION IF NOT EXISTS vector`) per the original stack plan, but
+no code generates embeddings this day, so no column was added for one with
+a guessed dimension. `notes_store` (ADR-011, repointed at this table per
+its own Day 2 promise) is a plain key/value store today; semantic recall
+over notes is deferred until something actually needs it.
+
+**Cross-cutting concern added:** LangGraph's own checkpoint tables
+(`checkpoints`/`checkpoint_blobs`/`checkpoint_writes`) have no foreign key
+back to `sessions` and are not cleaned up when a session's other rows are
+deleted — flagged in ADR-014 as a real, currently-unaddressed gap relevant
+to Supabase's free-tier storage cap (§5, ADR-003), not yet a Day 3
+requirement to fix (no `DELETE /sessions/{id}` endpoint exists).
