@@ -274,3 +274,40 @@ back to `sessions` and are not cleaned up when a session's other rows are
 deleted — flagged in ADR-014 as a real, currently-unaddressed gap relevant
 to Supabase's free-tier storage cap (§5, ADR-003), not yet a Day 3
 requirement to fix (no `DELETE /sessions/{id}` endpoint exists).
+
+## 9. Day 4 amendments — the frontend, and two backend gaps it closed
+
+**`GET /sessions` and an embedded `pending_action` on every session
+response** (ADR-018) — both explicitly deferred in ADR-015 until the UI's
+actual data needs were known. `POST /approvals/.../approve|reject` now
+return the session (with its embedded pending_action, if the run paused
+again), not the bare decided pending_action — the frontend needs to know
+what the session's state is *now*, which the decided action alone can't say.
+
+**Frontend (`frontend/src/`)** — two routes (`react-router-dom`): `/`
+(`SessionListPage` — the session list, a "New session" button) and
+`/sessions/:sessionId` (`SessionPage` — chat, trace viewer, approval
+modal). No polling or streaming: every mutating call
+(`sendMessage`/`approvePendingAction`/`rejectPendingAction`) is a normal
+request/response against the Day 3 API's synchronous design, and
+`SessionPage` re-fetches the trace after each one completes. The trace
+viewer (`TraceViewer.tsx`) is what ARCHITECTURE.md §0 calls "the trace IS
+the product" made real: every `trace_events` row rendered in order, colored
+by what actually happened (retry/rejection/success) via a text-heuristic
+over `detail` (ADR-019) rather than a structured field the backend doesn't
+emit.
+
+**Verified live** (not just via the 60 component/page tests): the full
+happy path (create session → task → real Gemini plans and calls the
+calculator → trace renders PLANNER/DELEGATE/TOOL CALL/OBSERVE/DECIDE/
+FINALIZE → status `Done`) and the full approval path (task pauses the
+graph → modal shows the real tool/args → approving resumes → trace grows
+with APPROVAL/TOOL CALL/... → status `Done`) both run correctly through
+the actual browser against the real backend, real Gemini, and real
+Supabase — screenshotted during the session, not just asserted on.
+
+**Day 1's two flagged `BackendStatus.tsx` cosmetics, folded in as planned:**
+the missing-checks list now uses the same status-keyed color as the header
+(previously hardcoded amber regardless of status) and the internal
+`Status` union's success variant is `'loaded'`, not `'ready'` — it no
+longer shadows `ReadinessResponse.status`'s own `'ready'` value.

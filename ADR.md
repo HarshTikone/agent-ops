@@ -1316,3 +1316,127 @@ and the full suite green both with and without the env vars exported.
   `Settings.model_fields` (rather than hand-naming the 7 that broke) is
   what protects against that going forward, not a guarantee nothing else
   is missed today.
+
+---
+
+## ADR-018: `GET /sessions` and an embedded `pending_action` — the two API gaps ADR-015 deferred, resolved now that the UI shape is known
+
+**Date:** 2026-08-24 (Day 4)
+
+**Context**
+
+ADR-015's "what we gave up" flagged two things explicitly as deferred until
+Day 4: no endpoint listed sessions at all, and no endpoint told a caller
+*which* pending action was blocking a given session without already
+knowing its id. Building the session-list page and the approval modal is
+what finally answers "what does the UI actually need."
+
+**Decision:** `GET /sessions` (most-recently-created first, no pagination
+cursor — a plain list is all a single-page session list needs at this
+scale) via a new `repo.list_sessions`. `SessionResponse` gains a
+`pending_action: PendingActionResponse | None` field, populated whenever
+`status == "awaiting_approval"` via a new `repo.get_pending_action_for_session`
+(at most one "live" pending row per session, since the graph itself blocks
+on `interrupt()` until it's decided — ADR-015) — moved to a shared
+`app/api/schemas.py` since both routers need the same shape now.
+
+**Decision: `POST /approvals/.../approve` and `.../reject` now return the
+session, not the bare decided `pending_action`.** The frontend deciding an
+approval needs to know what happens *next* — done? failed? paused again on
+a different pending action, which live verification during Day 3 already
+showed can happen for real (a rejection's re-plan proposing another write)?
+The decided action alone can't answer that without a second `GET
+/sessions/{id}` call the session-embedding response now makes unnecessary.
+`session_with_pending_action` (in `app/api/sessions.py`) is the one place
+that assembles this shape; `approvals.py` imports and reuses it rather than
+duplicating the embedding logic.
+
+**What we gave up**
+
+- No `DELETE /sessions/{id}` endpoint yet, so the session list has no way
+  to clean up old sessions from the UI — combined with ADR-014's flagged
+  gap (checkpoint rows have no FK to `sessions` and aren't cleaned up
+  either), a real deploy's session list only grows. Out of Day 4's
+  explicit scope (chat UI, trace viewer, approval modal, session list —
+  not session management), revisit if the list gets unwieldy in practice.
+- `list_sessions`'s `LIMIT 50` with no cursor means a session list beyond
+  50 silently truncates rather than paginating — acceptable for a
+  portfolio demo's realistic session count, not a real multi-user product's.
+
+---
+
+## ADR-019: Frontend architecture — synchronous refetch over polling, `react-router-dom`, and a text-heuristic trace-tone
+
+**Date:** 2026-08-24 (Day 4)
+
+**Context**
+
+Day 3's API is fully synchronous: `POST /sessions/{id}/messages` and `POST
+/approvals/{id}/approve|reject` each block until the graph either finishes
+or hits its next `interrupt()` (ADR-014/015). The frontend's whole
+architecture follows from taking that seriously rather than building
+infrastructure for a streaming/async backend that doesn't exist.
+
+**Decision: no polling, no websockets — a mutating action's own response,
+plus one follow-up fetch of the trace, is the entire update mechanism.**
+`sendMessage`/`approvePendingAction`/`rejectPendingAction` each return the
+fresh `Session` directly; `SessionPage.runAction` always re-fetches
+`GET /sessions/{id}/trace` afterward too, since `state["trace"]` (ADR-012)
+grows with every node the run touched and the frontend has no way to
+reconstruct that from the session response alone. A loading/"Thinking…"
+state covers the real several-second wait for a genuine Gemini call
+(verified live: the happy-path call and the approval-resume call each took
+a few real seconds end to end, not an instant mock).
+
+**Decision: `react-router-dom` (7.18.2, current on npm, verified live) for
+two routes** — `/` (session list) and `/sessions/:sessionId` (chat + trace
++ approval). `SessionPage` is deliberately remounted, not just re-rendered,
+on `sessionId` change: it's rendered through a tiny `SessionPageRoute`
+wrapper that reads the param and passes it as `key={sessionId}` to
+`SessionPage` itself. This was not a stylistic choice — the first version
+called `setLoad({state:'loading'})` directly inside `SessionPage`'s own
+effect to reset state on navigation, which `eslint-plugin-react-hooks`'
+`set-state-in-effect` rule correctly flagged, and which had a real bug
+underneath the lint warning: without a full remount, `submitting` and
+`actionError` from a PREVIOUS session would still be set when a user
+navigated straight to a new one, until the next fetch resolved. The `key`
+trick fixes both at once by letting `useState`'s own initializer do the
+resetting.
+
+**Decision: the trace viewer's color-coding is a text-content heuristic
+(`toneFor` in `TraceViewer.tsx`), not a structured signal from the
+backend.** `trace_events.detail` is a free-text string written by
+`app/graph/nodes.py` for a human reading the trace directly (Day 2/3) —
+substrings like `"FAILED (transient)"`, `"REJECTED"`, `"-> finalize"` are
+what `toneFor` matches on to decide warning/error/success coloring, since
+the backend doesn't (and, given ADR-012's `trace` list is exactly the
+free-text log design already committed to, wasn't going to before Day 4)
+emit a separate structured severity field.
+
+**What we gave up**
+
+- The trace's warning/error/success coloring is coupled to the exact
+  wording `nodes.py` writes into `detail` — a future change to that
+  wording (e.g. rewording "FAILED (transient)") silently drops back to the
+  default/neutral tone rather than erroring, since `toneFor` has no way to
+  know the string it expected stopped appearing. A structured `severity`
+  field on `trace_events` (set at the point each event is created, not
+  inferred from prose after the fact) would be more robust and was
+  considered, but adding a column and updating every `add_trace_event`
+  call site for a Day 4 cosmetic concern was judged more than this
+  feature needs today — revisit if the trace viewer grows more
+  sophisticated filtering/search on top of tone.
+- No live/streaming trace updates while a message or approval request is
+  in flight — a real Gemini call with several tool-call steps runs
+  entirely server-side before the frontend sees anything beyond
+  "Thinking…", so a genuinely long multi-step run gives no incremental
+  feedback. Server-sent events or WebSockets would fix this but need a
+  non-synchronous backend request model this project hasn't built
+  (ADR-014's endpoints are all request/response); out of Day 4's scope.
+- `ApprovalModal` re-renders fresh (its `reason` textarea resets) any time
+  its parent re-renders with a new `pendingAction` object identity, since
+  there's no explicit key tying the modal to a specific pending action id.
+  In practice this only matters if a session could show two DIFFERENT
+  pending actions without an intervening unmount, which the one-pending-
+  action-at-a-time invariant (ADR-015) rules out — flagged as a assumption
+  the component relies on rather than something it enforces itself.
