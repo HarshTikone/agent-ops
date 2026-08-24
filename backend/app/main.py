@@ -1,16 +1,11 @@
-"""FastAPI application entrypoint.
-
-Day 1 scope only: app wiring, CORS, and health/readiness endpoints. No LLM
-calls, no agent graph, no database access — those start Day 2 (agent
-engine) and Day 3 (memory/approval/tracing/API endpoints).
-"""
+"""FastAPI application entrypoint."""
 
 import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import health
+from app.api import approvals, health, sessions
 from app.config import get_settings
 
 settings = get_settings()
@@ -34,6 +29,8 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
+app.include_router(sessions.router)
+app.include_router(approvals.router)
 
 
 @app.get("/")
