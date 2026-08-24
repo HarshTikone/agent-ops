@@ -32,6 +32,17 @@ jobs:
         run: black --check .
 
       - name: Test (pytest)
+        env:
+          # Real credentials, not mocks — the DB-backed and integration
+          # tests (ADR-014) hit the real Supabase project and real Gemini;
+          # only OpenRouter is rate-limited (ADR-003), and the test suite
+          # never calls it, mocking the failover boundary instead.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: pytest -v
 
   frontend:
