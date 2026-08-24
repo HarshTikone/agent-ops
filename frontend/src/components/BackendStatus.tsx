@@ -1,10 +1,14 @@
 import { useEffect, useState } from 'react'
 import { fetchReadiness, type ReadinessResponse } from '../lib/api'
 
+// 'loaded', not 'ready' — the backend's OWN status value is also literally
+// "ready" (ReadinessResponse.status), and reusing the word here to mean
+// "the fetch resolved" shadowed that in a way that read confusingly next to
+// each other (flagged Day 1, fixed here alongside the rest of Day 4's UI).
 type Status =
   | { state: 'loading' }
   | { state: 'error'; message: string }
-  | { state: 'ready'; data: ReadinessResponse }
+  | { state: 'loaded'; data: ReadinessResponse }
 
 /**
  * Minimal, real connectivity check against the backend's /health/ready
@@ -18,7 +22,7 @@ export function BackendStatus() {
   useEffect(() => {
     const controller = new AbortController()
     fetchReadiness(controller.signal)
-      .then((data) => setStatus({ state: 'ready', data }))
+      .then((data) => setStatus({ state: 'loaded', data }))
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === 'AbortError') return
         const message = err instanceof Error ? err.message : 'Unknown error'
@@ -59,7 +63,7 @@ export function BackendStatus() {
     <div className="text-sm">
       <p className={statusColor[status.data.status]}>Backend status: {status.data.status}</p>
       {notConfigured.length > 0 && (
-        <ul className="mt-1 list-disc pl-5 text-amber-500">
+        <ul className={`mt-1 list-disc pl-5 ${statusColor[status.data.status]}`}>
           {notConfigured.map(([key]) => (
             <li key={key}>{key} missing</li>
           ))}
