@@ -63,6 +63,31 @@ def test_start_session_is_a_no_op_on_an_already_started_session(db_pool) -> None
             conn.execute("DELETE FROM sessions WHERE id = %s", (created["id"],))
 
 
+def test_list_sessions_returns_most_recent_first(db_pool) -> None:
+    older = repo.create_session(db_pool, task="older")
+    newer = repo.create_session(db_pool, task="newer")
+    try:
+        ids_in_order = [s["id"] for s in repo.list_sessions(db_pool)]
+        assert ids_in_order.index(newer["id"]) < ids_in_order.index(older["id"])
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id IN (%s, %s)", (older["id"], newer["id"]))
+
+
+def test_get_pending_action_for_session_finds_the_live_one(db_pool, session_row) -> None:
+    assert repo.get_pending_action_for_session(db_pool, session_row["id"]) is None
+
+    created = repo.create_pending_action(
+        db_pool, session_row["id"], tool_name="notes_store", tool_args={"action": "write"}
+    )
+    found = repo.get_pending_action_for_session(db_pool, session_row["id"])
+    assert found["id"] == created["id"]
+
+    repo.decide_pending_action(db_pool, created["id"], status="approved")
+    # decided — no longer the "live" pending one
+    assert repo.get_pending_action_for_session(db_pool, session_row["id"]) is None
+
+
 def test_update_session_status_sets_final_answer(db_pool, session_row) -> None:
     repo.update_session_status(
         db_pool, session_row["id"], status="done", final_answer="the answer is 4"

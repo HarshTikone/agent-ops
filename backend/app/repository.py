@@ -60,6 +60,18 @@ def get_session(pool: ConnectionPool, session_id: UUID) -> dict[str, Any] | None
         ).fetchone()
 
 
+def list_sessions(pool: ConnectionPool, *, limit: int = 50) -> list[dict[str, Any]]:
+    """Most recently created first — Day 4's session list (ADR-015 flagged
+    this as deferred until the UI shape was known; it's a plain list, no
+    pagination cursor, which is all a single-page session list needs)."""
+    with pool.connection() as conn:
+        return conn.execute(
+            "SELECT id, task, status, final_answer, created_at, updated_at "
+            "FROM sessions ORDER BY created_at DESC LIMIT %s",
+            (limit,),
+        ).fetchall()
+
+
 def update_session_status(
     pool: ConnectionPool, session_id: UUID, *, status: str, final_answer: str | None = None
 ) -> None:
@@ -133,6 +145,19 @@ def get_pending_action(pool: ConnectionPool, pending_action_id: UUID) -> dict[st
             "SELECT id, session_id, tool_name, tool_args, status, reason, created_at, decided_at "
             "FROM pending_actions WHERE id = %s",
             (pending_action_id,),
+        ).fetchone()
+
+
+def get_pending_action_for_session(pool: ConnectionPool, session_id: UUID) -> dict[str, Any] | None:
+    """The one 'pending' action currently blocking a session's run, if any —
+    at most one at a time, since the graph itself blocks on interrupt()
+    until it's decided (ADR-015). Lets a session response embed the exact
+    thing the approval modal needs without a second round trip."""
+    with pool.connection() as conn:
+        return conn.execute(
+            "SELECT id, session_id, tool_name, tool_args, status, reason, created_at, decided_at "
+            "FROM pending_actions WHERE session_id = %s AND status = 'pending'",
+            (session_id,),
         ).fetchone()
 
 

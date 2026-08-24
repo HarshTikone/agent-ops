@@ -1,4 +1,6 @@
-"""Session, message, and trace endpoints (ARCHITECTURE.md §1/§3, Day 3).
+"""Session, message, and trace endpoints (ARCHITECTURE.md §1/§3, Day 3;
+`GET /sessions` and the embedded `pending_action` added Day 4, per ADR-015's
+own note that both were deferred until the UI shape was known).
 
 Each request that runs the graph (`send_message`) blocks synchronously
 until the graph either finishes or pauses on an approval interrupt —
@@ -8,16 +10,15 @@ is resumed by a later, separate request, not held open in memory.
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel
 
 from app import repository as repo
+from app.api.schemas import CreateMessageRequest, SessionResponse, TraceEventResponse
 from app.config import Settings, get_settings
 from app.db import get_checkpointer, get_db_pool
 from app.dependencies import get_llm_provider
@@ -27,31 +28,21 @@ from app.session_runner import start_session_run
 router = APIRouter(tags=["sessions"])
 
 
-class SessionResponse(BaseModel):
-    id: UUID
-    task: str
-    status: str
-    final_answer: str | None
-    created_at: datetime
-    updated_at: datetime
-
-
-class TraceEventResponse(BaseModel):
-    id: int
-    session_id: UUID
-    node: str
-    detail: str
-    provider: str | None
-    created_at: datetime
-
-
-class CreateMessageRequest(BaseModel):
-    content: str
+def session_with_pending_action(pool: ConnectionPool, session: dict[str, Any]) -> dict[str, Any]:
+    pending_action = None
+    if session["status"] == "awaiting_approval":
+        pending_action = repo.get_pending_action_for_session(pool, session["id"])
+    return {**session, "pending_action": pending_action}
 
 
 @router.post("/sessions", response_model=SessionResponse, status_code=201)
 def create_session(pool: ConnectionPool = Depends(get_db_pool)) -> dict[str, Any]:
-    return repo.create_session(pool)
+    return session_with_pending_action(pool, repo.create_session(pool))
+
+
+@router.get("/sessions", response_model=list[SessionResponse])
+def list_sessions(pool: ConnectionPool = Depends(get_db_pool)) -> list[dict[str, Any]]:
+    return [session_with_pending_action(pool, s) for s in repo.list_sessions(pool)]
 
 
 @router.get("/sessions/{session_id}", response_model=SessionResponse)
@@ -59,7 +50,7 @@ def get_session(session_id: UUID, pool: ConnectionPool = Depends(get_db_pool)) -
     session = repo.get_session(pool, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
-    return session
+    return session_with_pending_action(pool, session)
 
 
 @router.post("/sessions/{session_id}/messages", response_model=SessionResponse)
@@ -95,7 +86,7 @@ def send_message(
         task=body.content,
         tavily_api_key=settings.tavily_api_key,
     )
-    return repo.get_session(pool, session_id)
+    return session_with_pending_action(pool, repo.get_session(pool, session_id))
 
 
 @router.get("/sessions/{session_id}/trace", response_model=list[TraceEventResponse])

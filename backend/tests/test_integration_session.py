@@ -45,6 +45,22 @@ class _ScriptedLLM:
         return self._responses.pop(0)
 
 
+def test_list_sessions_endpoint_returns_most_recent_first(db_pool) -> None:
+    client = TestClient(app)
+    older = client.post("/sessions").json()
+    newer = client.post("/sessions").json()
+    try:
+        listed = client.get("/sessions").json()
+        ids_in_order = [s["id"] for s in listed]
+        assert ids_in_order.index(newer["id"]) < ids_in_order.index(older["id"])
+        assert all(
+            s["pending_action"] is None for s in listed if s["status"] != "awaiting_approval"
+        )
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id IN (%s, %s)", (older["id"], newer["id"]))
+
+
 def test_full_session_through_the_real_api_including_approval(db_pool) -> None:
     client = TestClient(app)
 
@@ -62,6 +78,10 @@ def test_full_session_through_the_real_api_including_approval(db_pool) -> None:
         )
         assert sent.status_code == 200
         assert sent.json()["status"] == "awaiting_approval"
+        embedded_pending = sent.json()["pending_action"]
+        assert embedded_pending is not None
+        assert embedded_pending["tool_name"] == "notes_store"
+        assert embedded_pending["status"] == "pending"
 
         # a second message to an already-running session is a clear 409
         rejected_second_message = client.post(
@@ -81,7 +101,18 @@ def test_full_session_through_the_real_api_including_approval(db_pool) -> None:
 
         approved = client.post(f"/approvals/{pending['id']}/approve")
         assert approved.status_code == 200
-        assert approved.json()["status"] == "executed"
+        # approve now returns the SESSION (ADR-018), not the bare decided
+        # pending_action — its own status came back "executed" separately
+        # (checked via the DB below), since the two are different things.
+        assert approved.json()["status"] == "done"
+        assert approved.json()["pending_action"] is None
+        assert approved.json()["final_answer"]
+
+        with db_pool.connection() as conn:
+            decided = conn.execute(
+                "SELECT status FROM pending_actions WHERE id = %s", (pending["id"],)
+            ).fetchone()
+        assert decided["status"] == "executed"
 
         # approving again must be a clear 409, not a silent double-apply
         double_approve = client.post(f"/approvals/{pending['id']}/approve")

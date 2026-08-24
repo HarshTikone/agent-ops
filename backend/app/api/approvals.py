@@ -1,19 +1,25 @@
 """Approval endpoints — the pending_actions state machine's HTTP surface
 (ARCHITECTURE.md §2, ADR-015): pending -> approved/rejected -> executed.
+
+Returns the SESSION (with its embedded pending_action, ADR-018), not the
+bare decided pending_action — a caller deciding an approval needs to know
+what the session's state is *now* (done? failed? paused again on a new
+approval?), which the decided action alone can't tell it without a second
+round trip.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel
 
 from app import repository as repo
+from app.api.schemas import RejectRequest, SessionResponse
+from app.api.sessions import session_with_pending_action
 from app.config import Settings, get_settings
 from app.db import get_checkpointer, get_db_pool
 from app.dependencies import get_llm_provider
@@ -21,21 +27,6 @@ from app.llm.base import LLMProvider
 from app.session_runner import resume_session_run
 
 router = APIRouter(tags=["approvals"])
-
-
-class PendingActionResponse(BaseModel):
-    id: UUID
-    session_id: UUID
-    tool_name: str
-    tool_args: dict
-    status: str
-    reason: str | None
-    created_at: datetime
-    decided_at: datetime | None
-
-
-class RejectRequest(BaseModel):
-    reason: str | None = None
 
 
 def _decide(
@@ -78,10 +69,11 @@ def _decide(
         # tied to whether the REST of the session's run goes on to succeed.
         repo.mark_pending_action_executed(pool, pending_action_id)
 
-    return repo.get_pending_action(pool, pending_action_id)
+    session = repo.get_session(pool, decided["session_id"])
+    return session_with_pending_action(pool, session)
 
 
-@router.post("/approvals/{pending_action_id}/approve", response_model=PendingActionResponse)
+@router.post("/approvals/{pending_action_id}/approve", response_model=SessionResponse)
 def approve(
     pending_action_id: UUID,
     pool: ConnectionPool = Depends(get_db_pool),
@@ -100,7 +92,7 @@ def approve(
     )
 
 
-@router.post("/approvals/{pending_action_id}/reject", response_model=PendingActionResponse)
+@router.post("/approvals/{pending_action_id}/reject", response_model=SessionResponse)
 def reject(
     pending_action_id: UUID,
     body: RejectRequest,
