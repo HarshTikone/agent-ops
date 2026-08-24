@@ -91,9 +91,13 @@ def test_transient_tool_failure_retries_the_same_step_then_succeeds() -> None:
 
 
 def test_permanent_tool_failure_skips_retry_and_replans_immediately() -> None:
+    # Re-plans onto web_search, not notes_store(action="write") -- the
+    # latter is Day 3's approval-gated action (ADR-016) and would pause the
+    # graph on interrupt() instead of completing in one invoke() call; this
+    # test is about decide_next's replan mechanics, not approval.
     calc = _ScriptedTool("calculator", [ToolError("could not parse expression", transient=False)])
-    notes = _ScriptedTool("notes_store", ["saved note 'x'"])
-    tools = {"calculator": calc, "web_search": _empty_tool("web_search"), "notes_store": notes}
+    web = _ScriptedTool("web_search", ["found: x"])
+    tools = {"calculator": calc, "web_search": web, "notes_store": _empty_tool("notes_store")}
     llm = _ScriptedLLM(
         [
             LLMResponse(
@@ -105,13 +109,7 @@ def test_permanent_tool_failure_skips_retry_and_replans_immediately() -> None:
             ),
             LLMResponse(
                 content="",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="c2",
-                        name="notes_store",
-                        arguments={"action": "write", "key": "x", "content": "y"},
-                    )
-                ],
+                tool_calls=[ToolCallRequest(id="c2", name="web_search", arguments={"query": "x"})],
                 provider="gemini",
             ),
             LLMResponse(content="final", tool_calls=[], provider="gemini"),
@@ -122,7 +120,7 @@ def test_permanent_tool_failure_skips_retry_and_replans_immediately() -> None:
     result = graph.invoke(initial_state("do something"))
 
     assert calc.calls == [{"expression": "bad"}]  # exactly once — no retry on a permanent failure
-    assert notes.calls == [{"action": "write", "key": "x", "content": "y"}]
+    assert web.calls == [{"query": "x"}]
     assert result["replans"] == 1
     assert result["status"] == "done"
 
@@ -198,12 +196,14 @@ def test_hard_tool_call_cap_stops_a_long_plan_even_when_every_step_succeeds() ->
 def test_unknown_tool_selection_is_treated_as_a_permanent_failure_and_replans() -> None:
     """The scenario the brief calls out by name: the planner picks a tool
     that doesn't exist. Not a crash — decide_next routes it through the same
-    replan path as any other permanent step failure."""
-    notes = _ScriptedTool("notes_store", ["saved note 'x'"])
+    replan path as any other permanent step failure. Re-plans onto
+    web_search, not notes_store(write) — see the comment on the previous
+    test for why."""
+    web = _ScriptedTool("web_search", ["found: x"])
     tools = {
         "calculator": _empty_tool("calculator"),
-        "web_search": _empty_tool("web_search"),
-        "notes_store": notes,
+        "web_search": web,
+        "notes_store": _empty_tool("notes_store"),
     }
     llm = _ScriptedLLM(
         [
@@ -214,13 +214,7 @@ def test_unknown_tool_selection_is_treated_as_a_permanent_failure_and_replans() 
             ),
             LLMResponse(
                 content="",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="c2",
-                        name="notes_store",
-                        arguments={"action": "write", "key": "x", "content": "y"},
-                    )
-                ],
+                tool_calls=[ToolCallRequest(id="c2", name="web_search", arguments={"query": "x"})],
                 provider="gemini",
             ),
             LLMResponse(content="final", tool_calls=[], provider="gemini"),
@@ -232,4 +226,4 @@ def test_unknown_tool_selection_is_treated_as_a_permanent_failure_and_replans() 
 
     assert result["replans"] == 1
     assert result["status"] == "done"
-    assert notes.calls == [{"action": "write", "key": "x", "content": "y"}]
+    assert web.calls == [{"query": "x"}]

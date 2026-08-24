@@ -16,6 +16,7 @@ from collections.abc import Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END
+from langgraph.types import interrupt
 
 from app.graph.limits import MAX_REPLANS, MAX_STEP_RETRIES, MAX_TOOL_CALLS
 from app.graph.state import GraphState
@@ -82,8 +83,67 @@ def delegate_node(state: GraphState) -> dict:
     return {"trace": [*state["trace"], trace_entry]}
 
 
+# The one irreversible action in Day 3's tool set (ADR-016): writing a note
+# can't be undone by a later step the way a read or a computation can be
+# retried harmlessly. A (tool_name, action) pair, not a per-Tool flag on the
+# uniform Tool interface -- kept as an explicit, small, graph-level table
+# rather than growing the Tool protocol for one case; revisit if a second
+# tool ever needs write-approval semantics too.
+IRREVERSIBLE_STEPS = {("notes_store", "write")}
+
+
+def _needs_approval(step) -> bool:
+    return (step.name, step.arguments.get("action")) in IRREVERSIBLE_STEPS
+
+
+def approval_gate_node(state: GraphState) -> dict:
+    """Pauses the graph for human approval before an irreversible step runs
+    (ADR-015, ADR-016) -- the ONLY node that calls `interrupt()`. Kept as its
+    own node, separate from tool_call, because LangGraph re-runs a node's
+    entire function body from the top on resume (interrupt() itself is what
+    short-circuits replay, not the surrounding node) -- isolating it here
+    means only this small, idempotent check re-executes, not tool_call's
+    counter increments or tool.run() side effects.
+    """
+    step = state["plan"][state["step_index"]]
+    if not _needs_approval(step):
+        return {}
+
+    approved = interrupt({"tool_name": step.name, "tool_args": step.arguments, "step_id": step.id})
+
+    if approved:
+        return {
+            "trace": [
+                *state["trace"],
+                {
+                    "node": "approval_gate",
+                    "detail": f"step={state['step_index']} tool={step.name} APPROVED",
+                },
+            ]
+        }
+    return {
+        "last_result": None,
+        "last_failure": "the pending action was rejected",
+        "last_failure_transient": False,
+        "trace": [
+            *state["trace"],
+            {
+                "node": "approval_gate",
+                "detail": f"step={state['step_index']} tool={step.name} REJECTED",
+            },
+        ],
+    }
+
+
 def make_tool_call_node(tools: dict[str, Tool]) -> Callable[[GraphState], dict]:
     def tool_call_node(state: GraphState) -> dict:
+        if state["last_failure"] is not None:
+            # approval_gate already recorded a rejection for this step —
+            # nothing to run, pass the failure through untouched so
+            # decide_next handles it exactly like any other permanent
+            # step failure.
+            return {}
+
         step = state["plan"][state["step_index"]]
         tool_calls_made = state["tool_calls_made"] + 1
         tool = tools.get(step.name)
@@ -220,6 +280,13 @@ def decide_next_node(state: GraphState) -> dict:
         return {
             "next_action": "retry",
             "step_attempts": attempt,
+            # Cleared, not carried into the retry attempt: tool_call_node
+            # (ADR-016) reads last_failure to tell "approval_gate just
+            # rejected this step" apart from "run the tool normally" — a
+            # stale failure from the attempt that's being retried would be
+            # misread as a fresh rejection and skip the retry entirely.
+            "last_failure": None,
+            "last_failure_transient": None,
             "trace": [
                 *state["trace"],
                 {
