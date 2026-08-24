@@ -1236,3 +1236,83 @@ of its three actions, is more surface than the current tool set justifies.
   later write to the same key. The approval gate protects against *an
   unreviewed write happening at all*, not against notes generally being
   mutable once written.
+
+---
+
+## ADR-017: `_env_file=None` never meant what the test suite's own docstrings claimed — real environment variables were never isolated
+
+**Date:** 2026-08-24 (Day 3, post-CI-secrets correction)
+
+**Context**
+
+Adding `DATABASE_URL`/`GEMINI_API_KEY`/etc. as real GitHub Actions secrets
+for Day 3's DB-backed and integration tests (ADR-014) broke 7 previously-
+green tests in CI within minutes of the first push: four in
+`test_health.py` (`test_readiness_not_ready_when_nothing_configured` and
+three siblings) and three in `test_config.py`
+(`test_env_file_none_ignores_real_dotenv_even_when_present`,
+`test_settings_loads_an_explicit_env_file_path_regardless_of_cwd`,
+`test_settings_reads_repo_root_env_when_started_from_backend`) — all with
+the same shape: a test built to assert "nothing configured" or "this exact
+fake value" instead got back a real key.
+
+**What was actually true, verified directly against the CI failure logs and
+reproduced locally (not assumed from the pydantic-settings docs):**
+`_env_file=None` disables exactly one source — the dotenv file. It does
+nothing to stop pydantic-settings from reading real OS environment
+variables, which is a **separate, higher-precedence source** it always
+consults. Worse: a real environment variable for a field wins over an
+**explicit** `_env_file`'s content for that same field too — true whether
+`_env_file` is `None`, a real path, or a throwaway fake path built inside a
+test's own `tmp_path`. `conftest.py`'s `make_client` and three tests in
+`test_config.py` all silently depended on "no test environment has these
+env vars set" being true — which held, by coincidence, on every machine and
+CI runner this project had used through Day 2, and stopped holding the
+moment Day 3 gave the CI job real secrets for an unrelated reason (DB
+access). `test_env_file_none_ignores_real_dotenv_even_when_present`'s own
+docstring claimed `_env_file=None` "must keep meaning 'ignore any .env
+entirely'" — narrower and wrong: it was never about `.env`-the-file being
+the only other source.
+
+This is the same shape of gap ADR-007 named on Day 1 — a test's claim was
+broader than what it actually verified — just discovered by a real
+environment change instead of a deliberate mutation test, and in Day 1's
+original test suite rather than something written this session.
+
+**Decision:** stop relying on "no relevant env var happens to be set" as an
+implicit assumption. `tests/conftest.py` now derives
+`SETTINGS_ENV_VAR_NAMES` directly from `Settings.model_fields` (so a new
+field can't silently fall outside the isolation) and an `isolate_settings_env(monkeypatch)`
+helper that `monkeypatch.delenv`s every one of them. `make_client` calls it
+before constructing any `Settings(_env_file=None, ...)`. The three affected
+`test_config.py` tests call it too (or, for the subprocess-based test, pass
+an explicit `env=` with those names stripped from a copy of the parent's
+environment, since `subprocess.run` inherits the parent's environment by
+default otherwise).
+
+**Verified both directions, exactly reproducing the CI failure locally
+first:** ran the affected tests locally with the real `.env`'s values
+exported as real shell environment variables (`set -a && source ../.env`)
+— all 7 failed with the identical assertions CI showed. Applied the fix —
+all 7 passed, still with those real env vars exported. Then mutation-tested
+the fix itself: reverted `make_client` to drop the `isolate_settings_env`
+call (env vars still exported) — the exact same 4 `test_health.py` failures
+came back, named identically. Reverted the mutation; confirmed clean diff
+and the full suite green both with and without the env vars exported.
+
+**What we gave up**
+
+- `isolate_settings_env` clears env vars for the *current test's* Settings
+  construction — it doesn't (and can't, cheaply) prove no OTHER untested
+  code path in the app makes the same "nothing configured" assumption
+  outside a test context. `get_settings()`'s `@lru_cache` singleton is
+  built once per real process from the real environment (correct — that's
+  its whole job) and was never in question here; the gap was specific to
+  test fixtures asserting on an empty baseline.
+- This was caught because CI happened to add exactly the env var names
+  these tests were sensitive to, in the same week. A quieter version of
+  this gap — a test asserting on a field CI's secrets don't happen to
+  cover — could still exist undetected. Deriving the isolation list from
+  `Settings.model_fields` (rather than hand-naming the 7 that broke) is
+  what protects against that going forward, not a guarantee nothing else
+  is missed today.

@@ -4,6 +4,15 @@ Tests never rely on the developer's real `.env` — they build an explicit
 `Settings` instance and override FastAPI's dependency, so the suite behaves
 identically on a laptop with real keys and on a fresh CI runner with none.
 
+That guarantee had a real gap until ADR-017: `_env_file=None` only disables
+the *dotenv-file* source — pydantic-settings still reads real OS environment
+variables regardless, and (verified directly, not assumed) a real env var
+for the same field name wins over an explicit `_env_file`'s content too,
+whether that file is real, fake, or `None`. Invisible until Day 3's CI
+change gave the runner real `GEMINI_API_KEY`/etc. for the DB-backed tests —
+`SETTINGS_ENV_VAR_NAMES` + `monkeypatch.delenv` below is what actually
+closes it, not `_env_file=None` alone.
+
 Exception: the DB-backed fixtures below (`db_pool`, `session_row`) DO read
 the real `.env` / CI's real `DATABASE_URL` secret and hit the real Supabase
 project (ADR-014) — unlike the LLM providers, Postgres isn't rate-limited
@@ -20,17 +29,25 @@ from app import repository as repo
 from app.config import Settings, get_settings
 from app.main import app
 
+# Derived from the model, not hand-listed, so a new Settings field can't
+# silently fall outside the isolation this provides (ADR-017).
+SETTINGS_ENV_VAR_NAMES = [name.upper() for name in Settings.model_fields]
+
+
+def isolate_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in SETTINGS_ENV_VAR_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
 
 @pytest.fixture
-def make_client():
+def make_client(monkeypatch):
     """Factory fixture: build a TestClient with a given Settings override."""
+    isolate_settings_env(monkeypatch)
 
     def _make_client(**settings_overrides) -> TestClient:
         # _env_file=None disables loading the developer's real .env for this
-        # instance — otherwise "no config set" tests would pass or fail
-        # depending on whether *your* laptop happens to have real secrets in
-        # .env, which is exactly the kind of nondeterminism a test suite must
-        # not have.
+        # instance; isolate_settings_env (above) is what actually clears any
+        # real ambient env vars for the same field names — see ADR-017.
         settings = Settings(_env_file=None, **settings_overrides)
         app.dependency_overrides[get_settings] = lambda: settings
         return TestClient(app)

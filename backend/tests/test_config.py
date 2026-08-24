@@ -5,14 +5,23 @@ developer's real `.env` — otherwise these assertions would be nondeterministic
 depending on whether *your* machine happens to have real secrets on disk,
 which is exactly the kind of environment-dependent flakiness a test suite
 must not have (see also tests/conftest.py's `make_client`).
+
+Three tests below ALSO need `isolate_settings_env`/an explicit subprocess
+`env=` — `_env_file=None` disables the dotenv-file source only; real OS
+environment variables are a separate source pydantic-settings still reads,
+and (verified directly) win over an explicit `_env_file`'s content for the
+same field too. See ADR-017 for the full story of how this went unnoticed
+until Day 3's CI change gave the runner real secrets.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import app as app_package
 from app.config import _ENV_FILE, _REPO_ROOT, Settings
+from tests.conftest import SETTINGS_ENV_VAR_NAMES, isolate_settings_env
 
 # The real app/ directory's own location — never hardcode this as a relative
 # path from this test file, or the mutation test below would silently start
@@ -101,6 +110,12 @@ def test_settings_reads_repo_root_env_when_started_from_backend(tmp_path):
     relative again, this subprocess resolves it against the fake `backend/`
     CWD, finds nothing there, and `gemini_api_key` comes back `""` instead of
     the value below — failing this assertion.
+
+    The subprocess is given an explicit `env=`, not the default (inherit the
+    parent's environment) — otherwise a real `GEMINI_API_KEY` in the test
+    runner's own environment (true in CI as of Day 3, ADR-017) would win
+    over the fake dotenv value and this test would assert on the wrong
+    thing while still technically passing against a real key.
     """
     import shutil
 
@@ -112,12 +127,14 @@ def test_settings_reads_repo_root_env_when_started_from_backend(tmp_path):
     )
     (fake_repo_root / ".env").write_text("GEMINI_API_KEY=from-fake-repo-root\n", encoding="utf-8")
 
+    clean_env = {k: v for k, v in os.environ.items() if k.upper() not in SETTINGS_ENV_VAR_NAMES}
     result = subprocess.run(
         [sys.executable, "-c", "from app.config import Settings; print(Settings().gemini_api_key)"],
         cwd=fake_backend,
         capture_output=True,
         text=True,
         check=True,
+        env=clean_env,
     )
 
     assert result.stdout.strip() == "from-fake-repo-root"
@@ -126,7 +143,10 @@ def test_settings_reads_repo_root_env_when_started_from_backend(tmp_path):
 def test_settings_loads_an_explicit_env_file_path_regardless_of_cwd(tmp_path, monkeypatch):
     """Component-level check of pydantic-settings' own loading mechanism:
     given an absolute `_env_file` override, it reads that exact file even
-    when CWD points elsewhere.
+    when CWD points elsewhere — as long as no real environment variable for
+    the same field also exists (ADR-017: a real env var wins over an
+    explicit `_env_file`'s content, so this needs `isolate_settings_env`
+    too, not just a fake file, to observe the file's value at all).
 
     This does NOT exercise config.py's CWD-independence fix — passing
     `_env_file=fake_env` explicitly bypasses `model_config`'s `env_file`
@@ -136,6 +156,7 @@ def test_settings_loads_an_explicit_env_file_path_regardless_of_cwd(tmp_path, mo
     `test_model_config_actually_uses_the_anchored_path` and
     `test_settings_reads_repo_root_env_when_started_from_backend` above).
     """
+    isolate_settings_env(monkeypatch)
     fake_env = tmp_path / "fake_repo_root.env"
     fake_env.write_text("GEMINI_API_KEY=from-fake-env-file\n", encoding="utf-8")
 
@@ -145,12 +166,23 @@ def test_settings_loads_an_explicit_env_file_path_regardless_of_cwd(tmp_path, mo
     assert settings.gemini_api_key == "from-fake-env-file"
 
 
-def test_env_file_none_ignores_real_dotenv_even_when_present():
+def test_env_file_none_ignores_real_dotenv_even_when_present(monkeypatch):
     """`_env_file=None` (used throughout this suite and in conftest's
     `make_client`) must keep meaning "ignore any .env entirely" after the
     fix — not just "ignore the old relative path" — even on a machine where
     the real repo-root .env is fully populated with real keys.
+
+    `isolate_settings_env` is required alongside `_env_file=None`, not
+    redundant with it (ADR-017): `_env_file=None` only removes the
+    dotenv-file source; it does nothing about real OS environment variables,
+    which pydantic-settings reads regardless and which CI now genuinely has
+    set (GEMINI_API_KEY etc., added for the DB-backed tests in ADR-014).
+    Without the isolation call, this test passes on a machine with no
+    relevant env vars set and fails the moment one exists — exactly the
+    machine-dependent flakiness its own docstring already claimed to rule
+    out, which is exactly what happened in CI before this fix.
     """
+    isolate_settings_env(monkeypatch)
     settings = Settings(_env_file=None)
     assert settings.gemini_api_key == ""
     assert settings.supabase_url == ""
