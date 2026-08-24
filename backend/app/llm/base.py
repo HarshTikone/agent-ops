@@ -14,11 +14,22 @@ from typing import Any, Protocol
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.messages.tool import tool_call as make_tool_call
 from langchain_core.tools import BaseTool
+from pydantic import BaseModel, ConfigDict
 
 
-@dataclass(frozen=True)
-class ToolCallRequest:
-    """One planner-selected tool call — one step of the plan."""
+class ToolCallRequest(BaseModel):
+    """One planner-selected tool call — one step of the plan.
+
+    A Pydantic model, not a `@dataclass` (ADR-014): `state["plan"]` is part
+    of the graph state LangGraph's checkpointer persists to Postgres for the
+    approval pause/resume flow, and its serializer gives Pydantic v2 models
+    a dedicated, natively-supported round-trip path. A plain dataclass here
+    triggered "Deserializing unregistered type ... This will be blocked in
+    a future version" — verified live against a real checkpointed run, not
+    assumed from the warning text alone.
+    """
+
+    model_config = ConfigDict(frozen=True)
 
     id: str
     name: str
