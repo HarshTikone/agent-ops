@@ -12,8 +12,13 @@ langchain-google-genai==4.3.5
 langchain-openai==1.6.0
 openai==3.3.1
 
-# Database / memory / trace log (wired up starting Day 3)
-supabase==2.31.0
+# Database / memory / trace log / approval checkpointing (Day 3, ADR-014).
+# No ORM and no supabase-py client (a REST/Storage/Auth SDK, not a Postgres
+# driver, and unused here — see ADR-014's correction of ADR-004): raw SQL
+# over the same DATABASE_URL connection string via psycopg.
+psycopg[binary]==3.3.4
+psycopg-pool==3.3.1
+langgraph-checkpoint-postgres==3.1.2
 
 # Cross-cutting
 httpx==0.28.1
