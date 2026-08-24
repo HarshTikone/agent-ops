@@ -1,5 +1,9 @@
-"""NotesStoreTool: in-process, per-instance dict (Day 2 stand-in for Day 3's
-Supabase-backed session_memory)."""
+"""NotesStoreTool: Supabase-backed (ADR-014), against the real database —
+same rationale as test_repository.py: a mocked cursor wouldn't have caught
+the jsonb-adapter bug that live verification found while wiring this up.
+"""
+
+from __future__ import annotations
 
 import pytest
 
@@ -8,8 +12,8 @@ from app.tools.notes_store import NotesStoreTool
 
 
 @pytest.fixture
-def notes() -> NotesStoreTool:
-    return NotesStoreTool()
+def notes(db_pool, session_row) -> NotesStoreTool:
+    return NotesStoreTool(db_pool, session_row["id"])
 
 
 def test_write_then_read_round_trips(notes: NotesStoreTool) -> None:
@@ -45,10 +49,18 @@ def test_unknown_action_raises_permanent_tool_error(notes: NotesStoreTool) -> No
     assert exc_info.value.transient is False
 
 
-def test_two_instances_do_not_share_state() -> None:
-    """Confirms the store is per-instance, not module-global — important
-    since each session gets its own NotesStoreTool (ADR-011)."""
-    first, second = NotesStoreTool(), NotesStoreTool()
-    first.run(action="write", key="k", content="only in first")
-    with pytest.raises(ToolError):
-        second.run(action="read", key="k")
+def test_two_sessions_do_not_share_notes(db_pool, session_row) -> None:
+    """Confirms notes are scoped per session_id, not global — the whole
+    point of moving this off an in-process dict (ADR-011)."""
+    from app import repository as repo
+
+    other_session = repo.create_session(db_pool, task="other")
+    try:
+        first = NotesStoreTool(db_pool, session_row["id"])
+        second = NotesStoreTool(db_pool, other_session["id"])
+        first.run(action="write", key="k", content="only in first")
+        with pytest.raises(ToolError):
+            second.run(action="read", key="k")
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (other_session["id"],))

@@ -5,7 +5,10 @@ schemas the planner binds to the LLM so it can select among them.
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from langchain_core.tools import StructuredTool
+from psycopg_pool import ConnectionPool
 
 from app.tools.base import Tool
 from app.tools.calculator import CalculatorTool
@@ -13,8 +16,14 @@ from app.tools.notes_store import NotesStoreTool
 from app.tools.web_search import WebSearchTool
 
 
-def build_tool_registry(*, tavily_api_key: str) -> dict[str, Tool]:
-    tools: list[Tool] = [CalculatorTool(), NotesStoreTool(), WebSearchTool(tavily_api_key)]
+def build_tool_registry(
+    *, tavily_api_key: str, db_pool: ConnectionPool, session_id: UUID
+) -> dict[str, Tool]:
+    tools: list[Tool] = [
+        CalculatorTool(),
+        NotesStoreTool(db_pool, session_id),
+        WebSearchTool(tavily_api_key),
+    ]
     return {t.name: t for t in tools}
 
 
