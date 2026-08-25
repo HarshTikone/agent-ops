@@ -1,0 +1,1 @@
+{"content":"TS strict retrofit on a small well-typed codebase is usually cheap; noUncheckedIndexedAccess is the flag most likely to surface real bugs (array/object index access assumed defined).","source":"web","provider":"websearch","confidence":"MEDIUM","fetched_at":"2026-08-25T11:59:16.717Z","ttl":86400000,"kind":"web"}
