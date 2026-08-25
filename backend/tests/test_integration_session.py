@@ -22,6 +22,8 @@ Two complementary tests:
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from fastapi.testclient import TestClient
 
 from app import repository as repo
@@ -200,6 +202,171 @@ def test_forced_transient_failure_retries_and_persists_correctly(db_pool) -> Non
         )
         assert any(node == "decide_next" and "retry" in detail for node, detail in details_by_node)
         assert any(node == "tool_call" and detail == "OK: 4" for node, detail in details_by_node)
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+        get_checkpointer().delete_thread(str(session_id))
+
+
+class _RaisingProvider:
+    """Simulates any uncaught exception during a run (a provider
+    construction error like C1, a DB blip, a genuine bug) — anything that
+    isn't a ToolError the graph itself already handles."""
+
+    def generate(self, messages, tools=None):
+        raise RuntimeError("simulated provider crash")
+
+
+def test_provider_crash_during_send_message_leaves_session_failed_not_stuck(db_pool) -> None:
+    """C4 (ADR-020): before this fix, an uncaught exception here left the
+    session 'running' forever (repo.start_session's WHERE status='created'
+    guard then turned every retry into a 409, permanently) and the client
+    got a bare 500 with no record of what happened."""
+    from app.dependencies import get_llm_provider
+
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["id"]
+
+    app.dependency_overrides[get_llm_provider] = lambda: _RaisingProvider()
+    try:
+        response = client.post(f"/sessions/{session_id}/messages", json={"content": "do something"})
+    finally:
+        del app.dependency_overrides[get_llm_provider]
+
+    try:
+        assert response.status_code == 502
+        assert "detail" in response.json()
+
+        final = repo.get_session(db_pool, session_id)
+        assert final["status"] == "failed"
+        assert final["final_answer"]
+
+        # a retry must NOT hit the 409 "already running" trap forever --
+        # 'failed' is terminal, matching every other give_up path, so this
+        # correctly stays a 409 (one task per session, ADR-015), not a hang.
+        retry = client.post(f"/sessions/{session_id}/messages", json={"content": "retry"})
+        assert retry.status_code == 409
+
+        events = repo.list_trace_events(db_pool, session_id)
+        assert any(e["node"] == "system" and "CRASH" in e["detail"] for e in events)
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+        get_checkpointer().delete_thread(str(session_id))
+
+
+def test_add_message_failure_leaves_session_failed_not_stuck(db_pool) -> None:
+    """C4 residual gap (day-4-review.md High finding): repo.add_message runs
+    after repo.start_session has already committed the row to 'running', so
+    it must be covered by the same failed/trace/502 handling as the run
+    call itself -- a failure here must not permanently wedge the session at
+    'running' with no retry path."""
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["id"]
+
+    try:
+        with patch(
+            "app.api.sessions.repo.add_message", side_effect=RuntimeError("simulated db blip")
+        ):
+            response = client.post(
+                f"/sessions/{session_id}/messages", json={"content": "do something"}
+            )
+
+        assert response.status_code == 502
+
+        final = repo.get_session(db_pool, session_id)
+        assert final["status"] == "failed"
+        assert final["final_answer"]
+
+        # 'failed' is terminal, so a retry is a clean 409, not stuck 'running'.
+        retry = client.post(f"/sessions/{session_id}/messages", json={"content": "retry"})
+        assert retry.status_code == 409
+
+        events = repo.list_trace_events(db_pool, session_id)
+        assert any(e["node"] == "system" and "CRASH" in e["detail"] for e in events)
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+        get_checkpointer().delete_thread(str(session_id))
+
+
+def test_mark_executed_failure_leaves_session_failed_not_stranded(db_pool) -> None:
+    """C4 residual gap (day-4-review.md High finding): repo.mark_pending_action_executed
+    runs after repo.decide_pending_action has already committed 'approved',
+    so a failure here must still be covered by the same failed/trace/502
+    handling as the resume call. The pending action itself has no terminal
+    'failed' status in this schema and legitimately stays 'approved' (never
+    reaching 'executed', since that write is what failed) -- what must NOT
+    happen is the session staying wedged at 'awaiting_approval' forever."""
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["id"]
+    sent = client.post(
+        f"/sessions/{session_id}/messages",
+        json={"content": "Save a note with key 'k2' and content 'v2', using the notes tool."},
+    )
+    assert sent.json()["status"] == "awaiting_approval"
+    pending_action_id = sent.json()["pending_action"]["id"]
+
+    try:
+        with patch(
+            "app.api.approvals.repo.mark_pending_action_executed",
+            side_effect=RuntimeError("simulated db blip"),
+        ):
+            response = client.post(f"/approvals/{pending_action_id}/approve")
+
+        assert response.status_code == 502
+
+        final = repo.get_session(db_pool, session_id)
+        assert final["status"] == "failed"
+
+        # decide_pending_action already committed 'approved' before the try
+        # began; mark_pending_action_executed's write never landed, so the
+        # action correctly stays 'approved', not 'executed' -- the session
+        # being 'failed' (terminal) is what actually matters here.
+        decided = repo.get_pending_action(db_pool, pending_action_id)
+        assert decided["status"] == "approved"
+
+        events = repo.list_trace_events(db_pool, session_id)
+        assert any(e["node"] == "system" and "CRASH" in e["detail"] for e in events)
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+        get_checkpointer().delete_thread(str(session_id))
+
+
+def test_provider_crash_during_resume_leaves_session_failed_and_action_executed(db_pool) -> None:
+    """The approval-path sibling of the test above, plus the strand check:
+    the pending_action must already be 'executed' (marked before the resume
+    attempt, ADR-020) even though the resume itself crashed -- not stuck at
+    'approved' on a session stuck at 'awaiting_approval' forever."""
+    from app.dependencies import get_llm_provider
+
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["id"]
+    sent = client.post(
+        f"/sessions/{session_id}/messages",
+        json={"content": "Save a note with key 'k' and content 'v', using the notes tool."},
+    )
+    assert sent.json()["status"] == "awaiting_approval"
+    pending_action_id = sent.json()["pending_action"]["id"]
+
+    app.dependency_overrides[get_llm_provider] = lambda: _RaisingProvider()
+    try:
+        response = client.post(f"/approvals/{pending_action_id}/approve")
+    finally:
+        del app.dependency_overrides[get_llm_provider]
+
+    try:
+        assert response.status_code == 502
+
+        final = repo.get_session(db_pool, session_id)
+        assert final["status"] == "failed"
+
+        decided = repo.get_pending_action(db_pool, pending_action_id)
+        assert decided["status"] == "executed"
+
+        events = repo.list_trace_events(db_pool, session_id)
+        assert any(e["node"] == "system" and "CRASH" in e["detail"] for e in events)
     finally:
         with db_pool.connection() as conn:
             conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))

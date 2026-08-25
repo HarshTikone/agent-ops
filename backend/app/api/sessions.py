@@ -10,6 +10,7 @@ is resumed by a later, separate request, not held open in memory.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 from uuid import UUID
 
@@ -25,7 +26,11 @@ from app.dependencies import get_llm_provider
 from app.llm.base import LLMProvider
 from app.session_runner import start_session_run
 
+logger = logging.getLogger("agent_ops.api.sessions")
+
 router = APIRouter(tags=["sessions"])
+
+_RUN_CRASH_MESSAGE = "The agent run failed unexpectedly."
 
 
 def session_with_pending_action(pool: ConnectionPool, session: dict[str, Any]) -> dict[str, Any]:
@@ -77,15 +82,37 @@ def send_message(
             detail=f"session is '{session['status']}', not 'created' — cannot accept a new message",
         )
 
-    repo.add_message(pool, session_id, role="user", content=body.content)
-    start_session_run(
-        pool,
-        checkpointer,
-        llm,
-        session_id=session_id,
-        task=body.content,
-        tavily_api_key=settings.tavily_api_key,
-    )
+    try:
+        repo.add_message(pool, session_id, role="user", content=body.content)
+        start_session_run(
+            pool,
+            checkpointer,
+            llm,
+            session_id=session_id,
+            task=body.content,
+            tavily_api_key=settings.tavily_api_key,
+        )
+    except Exception as exc:
+        # C4 (ADR-020): without this, an exception anywhere from here on
+        # (a provider construction error, a DB blip on add_message itself, a
+        # genuine bug) left the row `running` forever — repo.start_session's
+        # WHERE status='created' guard then turns every retry into a 409,
+        # permanently. A session must always land on a terminal status, even
+        # when the run itself never got the chance to report one. add_message
+        # is inside this try for the same reason: it is one more write that
+        # happens after the row is already committed `running`, so it must be
+        # covered too, not just the run call.
+        logger.exception("session_run_failed session_id=%s", session_id)
+        repo.add_trace_event(
+            pool, session_id, node="system", detail=f"CRASH: the run failed unexpectedly: {exc}"
+        )
+        repo.update_session_status(
+            pool, session_id, status="failed", final_answer=_RUN_CRASH_MESSAGE
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="the agent run failed unexpectedly; the session has been marked failed",
+        ) from exc
     return session_with_pending_action(pool, repo.get_session(pool, session_id))
 
 

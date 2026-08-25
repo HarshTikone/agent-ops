@@ -19,6 +19,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 import app as app_package
 from app.config import _ENV_FILE, _REPO_ROOT, Settings
 from tests.conftest import SETTINGS_ENV_VAR_NAMES, isolate_settings_env
@@ -49,6 +52,36 @@ def test_is_production_flag():
 def test_llm_providers_configured_requires_gemini_key():
     assert Settings(_env_file=None, gemini_api_key="").llm_providers_configured is False
     assert Settings(_env_file=None, gemini_api_key="a-real-key").llm_providers_configured is True
+
+
+# --- C1's sibling defect (ADR-020): a half-configured OpenRouter fallback --
+# must fail at Settings() construction, not at first use inside a request.
+
+
+def test_settings_construction_succeeds_with_openrouter_fully_unset(monkeypatch):
+    isolate_settings_env(monkeypatch)
+    settings = Settings(_env_file=None, gemini_api_key="g")
+    assert settings.openrouter_api_key == ""
+    assert settings.openrouter_model == ""
+
+
+def test_settings_construction_succeeds_with_openrouter_fully_set(monkeypatch):
+    isolate_settings_env(monkeypatch)
+    settings = Settings(_env_file=None, openrouter_api_key="k", openrouter_model="some/model:free")
+    assert settings.openrouter_api_key == "k"
+    assert settings.openrouter_model == "some/model:free"
+
+
+def test_settings_construction_rejects_key_without_model(monkeypatch):
+    isolate_settings_env(monkeypatch)
+    with pytest.raises(ValidationError, match="OPENROUTER_API_KEY and OPENROUTER_MODEL"):
+        Settings(_env_file=None, openrouter_api_key="k", openrouter_model="")
+
+
+def test_settings_construction_rejects_model_without_key(monkeypatch):
+    isolate_settings_env(monkeypatch)
+    with pytest.raises(ValidationError, match="OPENROUTER_API_KEY and OPENROUTER_MODEL"):
+        Settings(_env_file=None, openrouter_api_key="", openrouter_model="some/model:free")
 
 
 # --- Regression coverage: env_file must not depend on process CWD ----------

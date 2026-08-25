@@ -237,17 +237,26 @@ def observe_node(state: GraphState) -> dict:
     }
 
 
-def decide_next_node(state: GraphState) -> dict:
-    if state["tool_calls_made"] >= MAX_TOOL_CALLS:
-        detail = f"give_up: hit the {MAX_TOOL_CALLS}-tool-call safety cap"
-        logger.warning("decide_next %s", detail)
-        return {
-            "next_action": "give_up",
-            "status": "failed",
-            "final_answer": f"Stopped after {MAX_TOOL_CALLS} tool calls without finishing the task.",
-            "trace": [*state["trace"], {"node": "decide_next", "detail": detail}],
-        }
+def _give_up_on_cap(state: GraphState) -> dict:
+    detail = f"give_up: hit the {MAX_TOOL_CALLS}-tool-call safety cap"
+    logger.warning("decide_next %s", detail)
+    return {
+        "next_action": "give_up",
+        "status": "failed",
+        "final_answer": f"Stopped after {MAX_TOOL_CALLS} tool calls without finishing the task.",
+        "trace": [*state["trace"], {"node": "decide_next", "detail": detail}],
+    }
 
+
+def decide_next_node(state: GraphState) -> dict:
+    # MAX_TOOL_CALLS gates CONTINUING (advance/retry/replan), never
+    # FINISHING (C3, ADR-020) — it's checked inside each of those three
+    # branches below, right before they'd consume another tool call, not
+    # unconditionally at the top. A plan that succeeds on exactly its
+    # MAX_TOOL_CALLS-th step must still reach `finalize`: the cap exists to
+    # stop a run that hasn't finished from burning unbounded budget, not to
+    # retroactively fail one that just did. See limits.py's docstring for
+    # the full precedence statement.
     if state["last_failure"] is None:
         next_index = state["step_index"] + 1
         if next_index >= len(state["plan"]):
@@ -259,6 +268,8 @@ def decide_next_node(state: GraphState) -> dict:
                     {"node": "decide_next", "detail": "plan complete -> finalize"},
                 ],
             }
+        if state["tool_calls_made"] >= MAX_TOOL_CALLS:
+            return _give_up_on_cap(state)
         return {
             "next_action": "advance",
             "step_index": next_index,
@@ -276,6 +287,8 @@ def decide_next_node(state: GraphState) -> dict:
     # retry the SAME step. Otherwise, either re-plan (if that budget isn't
     # spent) or give up.
     if state["last_failure_transient"] and state["step_attempts"] < MAX_STEP_RETRIES:
+        if state["tool_calls_made"] >= MAX_TOOL_CALLS:
+            return _give_up_on_cap(state)
         attempt = state["step_attempts"] + 1
         return {
             "next_action": "retry",
@@ -297,6 +310,8 @@ def decide_next_node(state: GraphState) -> dict:
         }
 
     if state["replans"] < MAX_REPLANS:
+        if state["tool_calls_made"] >= MAX_TOOL_CALLS:
+            return _give_up_on_cap(state)
         step = state["plan"][state["step_index"]]
         replan_count = state["replans"] + 1
         failure_context = HumanMessage(

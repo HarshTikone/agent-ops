@@ -10,6 +10,7 @@ round trip.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 from uuid import UUID
 
@@ -26,7 +27,11 @@ from app.dependencies import get_llm_provider
 from app.llm.base import LLMProvider
 from app.session_runner import resume_session_run
 
+logger = logging.getLogger("agent_ops.api.approvals")
+
 router = APIRouter(tags=["approvals"])
+
+_RUN_CRASH_MESSAGE = "The agent run failed unexpectedly after this decision."
 
 
 def _decide(
@@ -55,19 +60,54 @@ def _decide(
             status_code=409, detail=f"pending action already {existing['status']}, not 'pending'"
         )
 
-    resume_session_run(
-        pool,
-        checkpointer,
-        llm,
-        session_id=decided["session_id"],
-        approved=approve,
-        tavily_api_key=settings.tavily_api_key,
-    )
-    if approve:
-        # "executed" specifically means "the tool this pending_action named
-        # was attempted" — set right after the resume that let it run, not
-        # tied to whether the REST of the session's run goes on to succeed.
-        repo.mark_pending_action_executed(pool, pending_action_id)
+    try:
+        if approve:
+            # "executed" means "we approved this and are attempting to run
+            # it" (matching the docstring's original intent), NOT "the whole
+            # resume pipeline definitely completed without error" — that
+            # guarantee doesn't exist and isn't what this field is for.
+            # Marked BEFORE the (possibly-failing) resume call, not after, so
+            # a crash downstream of this point (C4, ADR-020) can never strand
+            # the action at 'approved' forever on a session stuck at
+            # 'awaiting_approval'. In the realistic failure shapes here, the
+            # tool itself already ran inside the graph (tool_call_node
+            # catches its own ToolErrors) — what typically crashes
+            # resume_session_run is something after that, e.g. persisting
+            # the result — so "attempted" is also usually true in the
+            # literal sense, not just the documented one. This write is
+            # inside the try for the same reason add_message is in
+            # sessions.py: it is one more write after the already-committed
+            # decide, so a failure here must land on 'failed' too, not
+            # escape uncaught.
+            repo.mark_pending_action_executed(pool, pending_action_id)
+
+        resume_session_run(
+            pool,
+            checkpointer,
+            llm,
+            session_id=decided["session_id"],
+            approved=approve,
+            tavily_api_key=settings.tavily_api_key,
+        )
+    except Exception as exc:
+        logger.exception(
+            "resume_run_failed session_id=%s pending_action_id=%s",
+            decided["session_id"],
+            pending_action_id,
+        )
+        repo.add_trace_event(
+            pool,
+            decided["session_id"],
+            node="system",
+            detail=f"CRASH: resume after {'approve' if approve else 'reject'} failed unexpectedly: {exc}",
+        )
+        repo.update_session_status(
+            pool, decided["session_id"], status="failed", final_answer=_RUN_CRASH_MESSAGE
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="the agent run failed unexpectedly after this decision; the session has been marked failed",
+        ) from exc
 
     session = repo.get_session(pool, decided["session_id"])
     return session_with_pending_action(pool, session)

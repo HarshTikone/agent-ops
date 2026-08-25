@@ -31,6 +31,7 @@ def test_readiness_ready_when_fully_configured(make_client):
     client = make_client(
         gemini_api_key="test-key",
         openrouter_api_key="test-key",
+        openrouter_model="test-model",
         supabase_url="https://example.supabase.co",
         supabase_secret_key="sb_secret_test",
         database_url="postgresql://user:pass@localhost:5432/db",
@@ -85,6 +86,7 @@ def test_readiness_not_ready_when_only_openrouter_key_present(make_client):
     """
     client = make_client(
         openrouter_api_key="test-key",
+        openrouter_model="test-model",
         supabase_url="https://example.supabase.co",
         supabase_secret_key="sb_secret_test",
         database_url="postgresql://user:pass@localhost:5432/db",

@@ -193,6 +193,39 @@ def test_hard_tool_call_cap_stops_a_long_plan_even_when_every_step_succeeds() ->
     assert len(cap_events) == 1
 
 
+def test_a_plan_that_succeeds_on_exactly_its_max_tool_calls_th_step_still_finalizes() -> None:
+    """C3 (ADR-020): the cap must gate CONTINUING, never FINISHING. A plan
+    with exactly MAX_TOOL_CALLS steps, every one successful, must reach
+    `finalize` and report `done` -- not be retroactively reported as
+    `failed` just because its step count happens to equal the cap."""
+    step_count = MAX_TOOL_CALLS
+    calc = _ScriptedTool("calculator", [str(i) for i in range(step_count)])
+    tools = {
+        "calculator": calc,
+        "web_search": _empty_tool("web_search"),
+        "notes_store": _empty_tool("notes_store"),
+    }
+    plan = [
+        ToolCallRequest(id=f"c{i}", name="calculator", arguments={"expression": str(i)})
+        for i in range(step_count)
+    ]
+    llm = _ScriptedLLM(
+        [
+            LLMResponse(content="", tool_calls=plan, provider="gemini"),
+            LLMResponse(content="all done", tool_calls=[], provider="gemini"),
+        ]
+    )
+    graph = build_graph(llm, tools, langchain_tools=[])
+
+    result = graph.invoke(initial_state("exactly at the cap"))
+
+    assert len(calc.calls) == MAX_TOOL_CALLS
+    assert result["status"] == "done"
+    assert result["final_answer"] == "all done"
+    cap_events = [e for e in result["trace"] if "safety cap" in e["detail"]]
+    assert cap_events == []
+
+
 def test_unknown_tool_selection_is_treated_as_a_permanent_failure_and_replans() -> None:
     """The scenario the brief calls out by name: the planner picks a tool
     that doesn't exist. Not a crash — decide_next routes it through the same

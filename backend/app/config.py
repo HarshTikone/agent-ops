@@ -12,7 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # pydantic-settings resolves a relative env_file against the process's CWD,
@@ -79,6 +79,27 @@ class Settings(BaseSettings):
         instead of a confusing downstream provider exception.
         """
         return bool(self.gemini_api_key)
+
+    @model_validator(mode="after")
+    def _reject_half_configured_openrouter(self) -> "Settings":
+        """`OPENROUTER_API_KEY` and `OPENROUTER_MODEL` must be both-set or
+        both-empty (ADR-020, C1's sibling defect). Half-configured used to
+        fail at first *use* — `ChatOpenAI` raises `openai.OpenAIError` at
+        construction time given an empty key, and an empty model string is
+        equally unusable — surfacing as a bare 500 on the first
+        `send_message`/approval call, not at startup where a misconfigured
+        deploy should fail loudly and immediately.
+        """
+        has_key = bool(self.openrouter_api_key)
+        has_model = bool(self.openrouter_model)
+        if has_key != has_model:
+            raise ValueError(
+                "OPENROUTER_API_KEY and OPENROUTER_MODEL must either both be set "
+                "or both be left empty — a half-configured OpenRouter fallback "
+                "fails at first use instead of at startup (see ADR-020). Currently "
+                f"openrouter_api_key_set={has_key} openrouter_model_set={has_model}."
+            )
+        return self
 
 
 @lru_cache
