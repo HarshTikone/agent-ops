@@ -114,7 +114,7 @@ describe('SessionListPage', () => {
     expect(localStorage.getItem('agent-ops.hidden-sessions')).toBe('[]')
   })
 
-  it('keeps locally hidden sessions out of the list after a reload', async () => {
+  it('keeps locally hidden sessions out of the list after a reload and lets them be restored', async () => {
     localStorage.setItem('agent-ops.hidden-sessions', '["bbbb2222"]')
     vi.mocked(api.listSessions).mockResolvedValue([
       makeSession({ id: 'aaaa1111', task: 'visible task' }),
@@ -125,5 +125,15 @@ describe('SessionListPage', () => {
 
     expect(await screen.findByText('visible task')).toBeInTheDocument()
     expect(screen.queryByText('hidden task')).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('1 session hidden on this device')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Show all hidden sessions' }))
+
+    expect(screen.getByText('hidden task')).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Show all hidden sessions' }),
+    ).not.toBeInTheDocument()
+    expect(localStorage.getItem('agent-ops.hidden-sessions')).toBe('[]')
   })
 })

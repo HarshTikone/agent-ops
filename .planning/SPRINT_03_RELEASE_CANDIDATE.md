@@ -1,9 +1,9 @@
 # Sprint 03 — Release Candidate and Public Demo
 
-> **Status: release verification in progress (2026-08-29).** The backend and
-> initial frontend are public, production migrations are current, and the
-> frontend redesign has passed local review. The redesigned build still needs
-> redeployment plus final public CORS and approval/rejection acceptance evidence.
+> **Status: production QA in progress (2026-08-29).** The backend and frontend
+> are public and production migrations are current. The two P2 QA findings are
+> fixed locally; operator-key approval/rejection acceptance and durable screenshot
+> evidence are still required before sprint completion.
 
 ## Goal and constraints
 
@@ -57,7 +57,7 @@ domain work is included.
 - [x] Render `/health`: healthy on 2026-08-29.
 - [x] Render `/health/ready`: ready on 2026-08-29.
 - [x] Vercel frontend URL: <https://agent-ops-sage.vercel.app>.
-- [ ] Exact-origin CORS and unauthenticated mutation checks recorded.
+- [x] Exact-origin CORS and unauthenticated mutation checks recorded.
 - [ ] Approval walkthrough recorded: task → pause → approve → trace → final.
 - [ ] Rejection walkthrough recorded and persists after refresh.
 - [ ] Screenshots added without exposing the operator key or provider secrets.
@@ -108,4 +108,32 @@ domain work is included.
 | Current backend regression | Passed | Ruff, mypy (36 source files), 116 passed, 39 database-dependent skipped, 1 live test deselected |
 | Production migration | Passed | Release image applied 0003 and 0004 on 2026-08-29; immediate repeat skipped 0001–0004 |
 | Public schema smoke | Passed | Public session detail and structured trace endpoint succeeded after migration |
-| Redesigned frontend deployment and E2E | Pending | Commit/push, exact-origin CORS save, and public approval/rejection walkthrough remain |
+| Vercel redesign deployment | Passed | Production serves commit `a942c8d` at <https://agent-ops-sage.vercel.app> |
+| Render CORS deployment | Passed | Deploy `dep-da97kg2jnfac73cussd0` succeeded for commit `a942c8d`; exact origin is `https://agent-ops-sage.vercel.app` |
+| Production security smoke | Passed | Allowed preflight 200 with exact origin; disallowed origin 400 without allow-origin header; unauthenticated `POST /sessions` 401 |
+| Public redesigned UI smoke | Passed | Readiness displayed as ready; session list, detail, and trace empty state loaded through Vercel |
+| Redesigned frontend E2E | Pending | Operator-key approval/rejection walkthrough and durable screenshots remain |
+
+## Production QA review — 2026-08-29
+
+Environment: Vercel production frontend at commit `a942c8d` with the Render
+production API and Supabase production database.
+
+| Area | Result | Evidence / review |
+|---|---|---|
+| Deployment version | Pass | Vercel and Render both serve commit `a942c8d`. |
+| Free-tier cold start | Pass | The UI retained accessible loading states and recovered to `Backend status: ready` with live sessions after about 30 seconds. |
+| API health and readiness | Pass | `/health` and `/health/ready` returned 200. |
+| CORS boundary | Pass | Exact Vercel-origin preflight returned 200 with the matching allow-origin header; an unrelated origin returned 400 without that header. |
+| Mutation authentication | Pass | Missing and invalid operator credentials returned 401 and created no session. |
+| Theme persistence | Pass | Light theme survived a full reload and the toggle exposed the correct next action; dark theme was restored after QA. |
+| SPA and not-found routing | Pass | Direct session URLs and an unknown production path both resolved through the Vercel rewrite; the unknown path rendered the accessible recovery page. |
+| Session detail and trace | Pass | The public deep link rendered one page heading, labeled Chat/Trace regions, message history, status, and trace empty state. |
+| Invalid/missing session errors | Pass | Malformed and unknown session URLs rendered concise accessible alerts while retaining navigation back to all sessions. |
+| Session soft-hide | **Fixed — Pass** | Hidden sessions now expose a persistent “Show all hidden sessions” recovery action after reload; focused and full regression suites pass. |
+| Repository formatting gate | **Fixed — Pass** | The project Prettier check now exits 0 across the complete frontend tree. |
+| Frontend lint | Pass | `npm run lint` exited 0. |
+| Frontend component suite | Pass | 13 files and 80 tests passed. |
+| Production bundle | Pass | TypeScript and Vite production build passed; JavaScript bundle was 252.60 kB (79.98 kB gzip). |
+| Existing production session | Resolved | A conditional one-row recovery marked session `AA4F` failed only because it was still running and more than one hour stale; no data was deleted. |
+| Approval and rejection acceptance | Blocked | Requires the dashboard-configured operator key to be entered manually in the public frontend; the secret was not read or exposed during QA. |

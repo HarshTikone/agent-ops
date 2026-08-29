@@ -87,6 +87,13 @@ export function SessionListPage() {
     setHiddenNotice(null)
   }
 
+  const restoreHiddenSessions = () => {
+    const next = new Set<string>()
+    persistHiddenSessionIds(next)
+    setHiddenSessionIds(next)
+    setHiddenNotice(null)
+  }
+
   return (
     <main className="mx-auto flex w-full max-w-[1120px] flex-col px-[var(--space-6)] py-[var(--space-8)]">
       <div className="mb-[var(--space-6)] flex flex-wrap items-end justify-between gap-[var(--space-4)]">
@@ -125,15 +132,30 @@ export function SessionListPage() {
         </p>
       )}
 
-      {hiddenNotice && (
+      {hiddenSessionIds.size > 0 && (
         <div
           role="status"
           className="mb-[var(--space-4)] flex flex-wrap items-center gap-[var(--space-2)] text-sm"
         >
-          <span>Session {hiddenNotice.id.slice(-4).toUpperCase()} is hidden on this device.</span>
-          <button type="button" onClick={undoRemove} className="btn btn-ghost px-2 py-1 text-xs">
-            Undo
-          </button>
+          <span>
+            {hiddenNotice
+              ? `Session ${hiddenNotice.id.slice(-4).toUpperCase()} is hidden on this device.`
+              : `${hiddenSessionIds.size} session${hiddenSessionIds.size === 1 ? '' : 's'} hidden on this device.`}
+          </span>
+          {hiddenNotice && (
+            <button type="button" onClick={undoRemove} className="btn btn-ghost px-2 py-1 text-xs">
+              Undo
+            </button>
+          )}
+          {(!hiddenNotice || hiddenSessionIds.size > 1) && (
+            <button
+              type="button"
+              onClick={restoreHiddenSessions}
+              className="btn btn-ghost px-2 py-1 text-xs"
+            >
+              Show all hidden sessions
+            </button>
+          )}
         </div>
       )}
 
