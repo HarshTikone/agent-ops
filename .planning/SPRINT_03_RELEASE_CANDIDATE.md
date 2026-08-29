@@ -2,8 +2,9 @@
 
 > **Status: production QA in progress (2026-08-29).** The backend and frontend
 > are public and production migrations are current. The two P2 QA findings are
-> fixed in production; operator-key approval/rejection acceptance and durable screenshot
-> evidence are still required before sprint completion.
+> fixed in production. The final security-header/accessibility remediation is
+> locally verified and awaiting deployment; operator-key approval/rejection
+> acceptance and durable screenshot evidence remain before sprint completion.
 
 ## Goal and constraints
 
@@ -116,8 +117,8 @@ domain work is included.
 
 ## Production QA review — 2026-08-29
 
-Environment: Vercel production frontend at commit `a942c8d` with the Render
-production API and Supabase production database.
+Environment: Vercel production frontend with the Render production API and
+Supabase production database.
 
 | Area | Result | Evidence / review |
 |---|---|---|
@@ -132,8 +133,11 @@ production API and Supabase production database.
 | Invalid/missing session errors | Pass | Malformed and unknown session URLs rendered concise accessible alerts while retaining navigation back to all sessions. |
 | Session soft-hide | **Fixed — Pass** | Production exposed “Show all hidden sessions” for the QA-hidden row; restoring it and refreshing kept the session visible. Focused and full regression suites pass. |
 | Repository formatting gate | **Fixed — Pass** | The project Prettier check now exits 0 across the complete frontend tree. |
+| Security response headers | Remediation ready | Strict CSP without `unsafe-inline`, anti-sniffing, framing, referrer, and permissions policies are configured and protected by regression tests; public verification follows deployment. |
+| Heading hierarchy | **Fixed — Pass** | Session card titles are level-two headings beneath the Sessions H1 and have explicit component coverage. |
+| Hide-action naming | **Fixed — Pass** | The accessible name now states that the session is hidden on this device and matches the non-destructive behavior. |
 | Frontend lint | Pass | `npm run lint` exited 0. |
-| Frontend component suite | Pass | 13 files and 80 tests passed. |
-| Production bundle | Pass | TypeScript and Vite production build passed; JavaScript bundle was 252.60 kB (79.98 kB gzip). |
+| Frontend component suite | Pass | 14 files and 83 tests passed. |
+| Production bundle | Pass | TypeScript and Vite production build passed; JavaScript bundle was 252.71 kB (80.00 kB gzip), with no secret-name or source-map matches. |
 | Existing production session | Resolved | A conditional one-row recovery marked session `AA4F` failed only because it was still running and more than one hour stale; no data was deleted. |
 | Approval and rejection acceptance | Blocked | Requires the dashboard-configured operator key to be entered manually in the public frontend; the secret was not read or exposed during QA. |

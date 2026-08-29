@@ -100,7 +100,7 @@ describe('SessionListPage', () => {
     renderPage()
 
     expect(await screen.findByText('remove me')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Remove session 2222' }))
+    await user.click(screen.getByRole('button', { name: 'Hide session 2222 on this device' }))
 
     expect(screen.queryByText('remove me')).not.toBeInTheDocument()
     expect(screen.getByText('keep me')).toBeInTheDocument()

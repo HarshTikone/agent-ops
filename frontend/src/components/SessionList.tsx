@@ -51,9 +51,9 @@ export function SessionList({
             className="flex flex-1 flex-col gap-[var(--space-3)] after:absolute after:inset-0 after:content-['']"
           >
             <span className="card-kicker pr-[28px]">SESSION · {shortId(session.id)}</span>
-            <h3 className="card-title flex-1">
+            <h2 className="card-title flex-1">
               {session.task || <span className="text-muted italic">Untitled session</span>}
-            </h3>
+            </h2>
             <span className="card-meta">
               <StatusBadge status={session.status} />
               <span aria-hidden="true">·</span>
@@ -64,7 +64,7 @@ export function SessionList({
           {onRemove && (
             <button
               type="button"
-              aria-label={`Remove session ${shortId(session.id)}`}
+              aria-label={`Hide session ${shortId(session.id)} on this device`}
               title="Hide this session on this device"
               onClick={(event) => {
                 // Belt and braces: the link is a sibling, not an ancestor,

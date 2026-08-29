@@ -40,14 +40,6 @@ function toneFor(event: TraceEvent): Tone {
   return 'default'
 }
 
-// One token per tone, used for the rail, the icon and the node label alike.
-const TONE_COLORS: Record<Tone, string> = {
-  default: 'var(--color-neutral-500)',
-  success: 'var(--color-success)',
-  warning: 'var(--color-warning)',
-  error: 'var(--color-danger)',
-}
-
 const TONE_ICONS: Record<Tone, ReactNode> = {
   default: <InfoCircleIcon size={14} />,
   success: <CheckCircleIcon size={14} />,
@@ -82,23 +74,16 @@ export function TraceViewer({ events }: { events: TraceEvent[] }) {
     <ol aria-label="Agent trace" className="flex list-none flex-col gap-[var(--space-4)] p-0">
       {events.map((event) => {
         const tone = toneFor(event)
-        const color = TONE_COLORS[tone]
         return (
           <li
             key={event.id}
             data-tone={tone}
-            className="flex gap-[var(--space-2)] border-l-2 py-[2px] pl-[var(--space-3)]"
-            style={{ borderColor: color }}
+            className="trace-event flex gap-[var(--space-2)] border-l-2 py-[2px] pl-[var(--space-3)]"
           >
-            <span className="mt-[1px] flex-none" style={{ color }}>
-              {TONE_ICONS[tone]}
-            </span>
+            <span className="trace-tone mt-[1px] flex-none">{TONE_ICONS[tone]}</span>
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-baseline gap-x-2">
-                <span
-                  className="[font-family:var(--font-heading)] text-xs font-semibold tracking-[0.04em]"
-                  style={{ color }}
-                >
+                <span className="trace-tone [font-family:var(--font-heading)] text-xs font-semibold tracking-[0.04em]">
                   {nodeLabel(event.node)}
                 </span>
                 {event.provider && (

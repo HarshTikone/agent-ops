@@ -41,15 +41,17 @@ describe('SessionList', () => {
     expect(links).toHaveLength(2)
     expect(links[0]).toHaveAttribute('href', '/sessions/s1')
     expect(links[0]).toHaveTextContent('first task')
+    expect(screen.getByRole('heading', { level: 2, name: 'first task' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 2, name: 'second task' })).toBeInTheDocument()
     expect(screen.getByText('Needs approval')).toBeInTheDocument()
   })
 
   it('shows a placeholder for a session with no task yet', () => {
     renderWithRouter(<SessionList sessions={[makeSession({ task: '', status: 'created' })]} />)
     expect(screen.getByText('Untitled session')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /remove session/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /hide session/i })).not.toBeInTheDocument()
   })
-  it('removes a session from its own card without opening the session', async () => {
+  it('hides a session from its own card without opening the session', async () => {
     const user = userEvent.setup()
     const onRemove = vi.fn()
     renderWithRouter(
@@ -59,7 +61,7 @@ describe('SessionList', () => {
       />,
     )
 
-    await user.click(screen.getByRole('button', { name: 'Remove session 1234' }))
+    await user.click(screen.getByRole('button', { name: 'Hide session 1234 on this device' }))
 
     expect(onRemove).toHaveBeenCalledWith('abcd1234')
     // The remove control is a sibling of the card link, never nested inside

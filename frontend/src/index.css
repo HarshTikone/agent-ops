@@ -278,6 +278,30 @@
     color: #f0c4bd;
   }
 
+  /* Trace tones use classes instead of React style attributes so the public
+     frontend can enforce a CSP without allowing arbitrary inline styles. */
+  .trace-event {
+    --trace-tone-color: var(--color-neutral-500);
+
+    border-color: var(--trace-tone-color);
+  }
+
+  .trace-event[data-tone='success'] {
+    --trace-tone-color: var(--color-success);
+  }
+
+  .trace-event[data-tone='warning'] {
+    --trace-tone-color: var(--color-warning);
+  }
+
+  .trace-event[data-tone='error'] {
+    --trace-tone-color: var(--color-danger);
+  }
+
+  .trace-tone {
+    color: var(--trace-tone-color);
+  }
+
   /* Blueprint frame — hairline box with a registration crosshair at each
      corner. Square corners only; the fill stays transparent so the page
      background reads through (surface is reserved for bubbles/dialogs). */

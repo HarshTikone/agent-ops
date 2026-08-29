@@ -5,25 +5,11 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Agent Ops</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <script src="/theme-bootstrap.js"></script>
     <link
       href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;700&family=Barlow+Condensed:wght@400;600&display=swap"
       rel="stylesheet"
     />
-    <script>
-      // Applied before first paint so a light-theme user never sees a dark
-      // flash. Dark is the default when nothing has been stored yet; the
-      // key and values are the ones src/lib/theme.ts reads and writes.
-      ;(function () {
-        try {
-          var stored = localStorage.getItem('agent-ops.theme')
-          document.documentElement.dataset.theme = stored === 'light' ? 'light' : 'dark'
-        } catch (e) {
-          document.documentElement.dataset.theme = 'dark'
-        }
-      })()
-    </script>
   </head>
   <body>
     <div id="root"></div>
