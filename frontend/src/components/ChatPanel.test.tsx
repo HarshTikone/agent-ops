@@ -23,6 +23,7 @@ describe('ChatPanel', () => {
       <ChatPanel session={makeSession()} onSendMessage={vi.fn()} submitting={false} error={null} />,
     )
     expect(screen.getByLabelText(/what should the agent do/i)).toBeInTheDocument()
+    expect(screen.getByLabelText(/what should the agent do/i)).toHaveFocus()
     expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument()
   })
 

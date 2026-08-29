@@ -32,12 +32,12 @@ export function OperatorKeyControl() {
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
         placeholder={configured ? 'Operator key saved' : 'Operator key'}
-        className="w-36 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-xs text-neutral-100"
+        className="input w-36 py-1 text-xs"
       />
       <button
         type="submit"
         disabled={!draft.trim()}
-        className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 disabled:opacity-40"
+        className="btn btn-secondary px-3 py-1 text-xs"
       >
         Save
       </button>
@@ -45,7 +45,7 @@ export function OperatorKeyControl() {
         <button
           type="button"
           onClick={clear}
-          className="text-xs text-neutral-500 hover:text-red-300"
+          className="btn btn-ghost px-2 py-1 text-xs text-[var(--color-danger)]"
         >
           Clear
         </button>

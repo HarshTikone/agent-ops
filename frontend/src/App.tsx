@@ -1,7 +1,9 @@
-import { BrowserRouter, Route, Routes, useParams } from 'react-router-dom'
+import { BrowserRouter, Link, Route, Routes, useParams } from 'react-router-dom'
 import { BackendStatus } from './components/BackendStatus'
 import { AppErrorBoundary } from './components/AppErrorBoundary'
+import { BrandMark } from './components/icons'
 import { OperatorKeyControl } from './components/OperatorKeyControl'
+import { ThemeToggle } from './components/ThemeToggle'
 import { SessionListPage } from './pages/SessionListPage'
 import { SessionPage } from './pages/SessionPage'
 
@@ -18,12 +20,14 @@ function SessionPageRoute() {
 
 function NotFoundPage() {
   return (
-    <main className="mx-auto max-w-2xl px-4 py-12">
-      <h1 className="text-xl font-semibold text-neutral-100">Page not found</h1>
-      <p className="mt-2 text-sm text-neutral-400">The requested Agent Ops page does not exist.</p>
-      <a href="/" className="mt-4 inline-block text-sm text-blue-400 hover:text-blue-300">
+    <main className="mx-auto max-w-[1120px] px-[var(--space-6)] py-[var(--space-8)]">
+      <h1>Page not found</h1>
+      <p className="text-muted mt-[var(--space-2)] text-sm">
+        The requested Agent Ops page does not exist.
+      </p>
+      <Link to="/" className="btn btn-secondary mt-[var(--space-4)]">
         Return to all sessions
-      </a>
+      </Link>
     </main>
   )
 }
@@ -31,24 +35,35 @@ function NotFoundPage() {
 function App() {
   return (
     <BrowserRouter>
-      <div id="app-shell" className="min-h-screen bg-neutral-950 text-neutral-100">
-        <header className="border-b border-neutral-800 px-4 py-3">
-          <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center justify-between gap-3">
-            <h1 className="text-lg font-semibold">Agent Ops</h1>
-            <div className="flex flex-wrap items-center justify-end gap-3">
-              <OperatorKeyControl />
-              <BackendStatus />
+      <AppErrorBoundary>
+        <div
+          id="app-shell"
+          className="min-h-screen bg-[var(--color-bg)] text-[var(--color-text)] transition-colors"
+        >
+          <header className="border-b border-[var(--color-divider)] px-[var(--space-6)] py-[var(--space-3)]">
+            <div className="mx-auto flex w-full max-w-[1120px] flex-wrap items-center justify-between gap-[var(--space-4)]">
+              <Link
+                to="/"
+                aria-label="Agent Ops home"
+                className="brand-link flex items-center gap-[9px] text-[15px] tracking-[0.08em] uppercase"
+              >
+                <BrandMark className="flex-none text-[var(--color-accent)]" />
+                Agent Ops
+              </Link>
+              <div className="flex flex-wrap items-center justify-end gap-[var(--space-4)]">
+                <OperatorKeyControl />
+                <BackendStatus />
+                <ThemeToggle />
+              </div>
             </div>
-          </div>
-        </header>
-        <AppErrorBoundary>
+          </header>
           <Routes>
             <Route path="/" element={<SessionListPage />} />
             <Route path="/sessions/:sessionId" element={<SessionPageRoute />} />
             <Route path="*" element={<NotFoundPage />} />
           </Routes>
-        </AppErrorBoundary>
-      </div>
+        </div>
+      </AppErrorBoundary>
     </BrowserRouter>
   )
 }

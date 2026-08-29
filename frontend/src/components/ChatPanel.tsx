@@ -36,67 +36,73 @@ export function ChatPanel({
     }
 
     return (
-      <form onSubmit={handleSubmit} className="flex flex-col gap-2">
-        <label htmlFor="task-input" className="text-sm text-neutral-400">
-          What should the agent do?
-        </label>
-        <textarea
-          id="task-input"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={handleKeyDown}
-          disabled={submitting}
-          maxLength={maxMessageLength}
-          aria-describedby="task-input-limit"
-          rows={3}
-          className="rounded border border-neutral-700 bg-neutral-950 p-2 text-sm text-neutral-100 disabled:opacity-50"
-          placeholder="e.g. What is 47 times 89? Use the calculator tool."
-        />
-        <p id="task-input-limit" className="text-xs text-neutral-500">
-          {draft.length.toLocaleString()} / {maxMessageLength.toLocaleString()} characters
-        </p>
+      <form onSubmit={handleSubmit}>
+        <div className="field">
+          <label htmlFor="task-input">What should the agent do?</label>
+          <textarea
+            id="task-input"
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={submitting}
+            maxLength={maxMessageLength}
+            aria-describedby="task-input-limit"
+            rows={3}
+            className="input resize-y"
+            placeholder="e.g. What is 47 times 89? Use the calculator tool."
+          />
+        </div>
+
+        <div className="mt-[var(--space-2)] flex items-center justify-between gap-[var(--space-3)]">
+          <span id="task-input-limit" className="text-muted text-xs">
+            {draft.length.toLocaleString()} / {maxMessageLength.toLocaleString()} characters
+          </span>
+          <button
+            type="submit"
+            disabled={submitting || draft.trim() === '' || draft.trim().length > maxMessageLength}
+            className="btn btn-primary"
+          >
+            {submitting ? 'Thinking…' : 'Send'}
+          </button>
+        </div>
+
         {error && (
-          <p role="alert" className="text-sm text-red-400">
+          <p role="alert" className="mt-[var(--space-2)] text-sm text-[var(--color-danger)]">
             {error}
           </p>
         )}
-        <button
-          type="submit"
-          disabled={submitting || draft.trim() === '' || draft.trim().length > maxMessageLength}
-          className="self-start rounded bg-blue-700 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-600 disabled:opacity-50"
-        >
-          {submitting ? 'Thinking…' : 'Send'}
-        </button>
       </form>
     )
   }
 
   return (
-    <div className="flex flex-col gap-3">
-      <div className="self-end rounded-lg bg-blue-900 px-3 py-2 text-sm text-blue-100">
+    <div className="flex flex-col gap-[var(--space-3)]">
+      <div className="max-w-[80%] self-end rounded-[var(--radius-md)] bg-[var(--color-accent-100)] p-[var(--space-3)] text-sm text-[var(--color-accent-800)]">
         {session.task}
       </div>
 
       {session.final_answer && (
-        <div className="self-start rounded-lg bg-neutral-800 px-3 py-2 text-sm text-neutral-100">
+        <div className="max-w-[80%] self-start rounded-[var(--radius-md)] border border-[var(--color-divider)] bg-[var(--color-surface)] p-[var(--space-3)] text-sm">
           {session.final_answer}
         </div>
       )}
 
       {!session.final_answer && session.status === 'running' && (
-        <p role="status" className="text-sm text-neutral-500">
+        <p role="status" className="text-muted text-[13px]">
+          <span className="pulse-dot mr-[6px]" />
           Thinking…
         </p>
       )}
 
       {!session.final_answer && session.status === 'awaiting_approval' && (
-        <p role="status" className="text-sm text-amber-400">
+        <p role="status" className="text-[13px] text-[var(--color-warning)]">
           Paused — waiting for your approval below.
         </p>
       )}
 
       {error && (
-        <p role="alert" className="text-sm text-red-400">
+        <p role="alert" className="text-sm text-[var(--color-danger)]">
           {error}
         </p>
       )}

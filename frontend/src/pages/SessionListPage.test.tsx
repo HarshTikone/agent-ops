@@ -37,10 +37,12 @@ function renderPage() {
 
 describe('SessionListPage', () => {
   beforeEach(() => {
+    localStorage.clear()
     vi.mocked(api.listSessions).mockReturnValue(new Promise(() => {}))
   })
 
   afterEach(() => {
+    localStorage.clear()
     vi.clearAllMocks()
   })
 
@@ -88,5 +90,40 @@ describe('SessionListPage', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('rate limited')
     expect(screen.getByRole('button', { name: 'New session' })).toBeEnabled()
+  })
+  it('removes a session card from the list when its remove button is clicked', async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      makeSession({ id: 'aaaa1111', task: 'keep me' }),
+      makeSession({ id: 'bbbb2222', task: 'remove me' }),
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    expect(await screen.findByText('remove me')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Remove session 2222' }))
+
+    expect(screen.queryByText('remove me')).not.toBeInTheDocument()
+    expect(screen.getByText('keep me')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('2222 is hidden on this device')
+    expect(localStorage.getItem('agent-ops.hidden-sessions')).toBe('["bbbb2222"]')
+    // Removal is list-local: it must not navigate into the session.
+    expect(screen.queryByText('Session detail placeholder')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Undo' }))
+    expect(screen.getByText('remove me')).toBeInTheDocument()
+    expect(localStorage.getItem('agent-ops.hidden-sessions')).toBe('[]')
+  })
+
+  it('keeps locally hidden sessions out of the list after a reload', async () => {
+    localStorage.setItem('agent-ops.hidden-sessions', '["bbbb2222"]')
+    vi.mocked(api.listSessions).mockResolvedValue([
+      makeSession({ id: 'aaaa1111', task: 'visible task' }),
+      makeSession({ id: 'bbbb2222', task: 'hidden task' }),
+    ])
+
+    renderPage()
+
+    expect(await screen.findByText('visible task')).toBeInTheDocument()
+    expect(screen.queryByText('hidden task')).not.toBeInTheDocument()
   })
 })

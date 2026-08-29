@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { PendingAction } from '../lib/api'
+import { ShieldIcon } from './icons'
 
 export type ApprovalSubmission = 'approve' | 'reject' | null
 
@@ -81,68 +82,71 @@ export function ApprovalModal({
   }, [])
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[color-mix(in_srgb,var(--color-neutral-900)_50%,transparent)] p-[var(--space-4)]">
       <div
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="approval-modal-heading"
         aria-describedby="approval-modal-description"
-        className="w-full max-w-md rounded-lg border border-amber-800 bg-neutral-900 p-5"
+        className="flex w-full max-w-[440px] flex-col gap-[var(--space-3)] rounded-[var(--radius-lg)] bg-[var(--color-surface)] p-[var(--space-4)] shadow-[var(--shadow-lg)]"
       >
         <h2
           ref={headingRef}
           id="approval-modal-heading"
           tabIndex={-1}
-          className="text-lg font-semibold text-amber-300 outline-none"
+          className="flex items-center gap-2 text-[17px] text-[var(--color-warning)] outline-none"
         >
+          <ShieldIcon size={18} />
           Approval needed
         </h2>
-        <p id="approval-modal-description" className="mt-1 text-sm text-neutral-400">
+        <p id="approval-modal-description" className="text-muted m-0 text-sm">
           The agent wants to run an irreversible action before continuing.
         </p>
 
-        <dl className="mt-4 space-y-2 rounded border border-neutral-800 bg-neutral-950 p-3 text-sm">
+        <dl className="m-0 rounded-[var(--radius-md)] border border-[var(--color-divider)] p-[var(--space-3)] text-[13px]">
           <div>
-            <dt className="text-xs tracking-wide text-neutral-500 uppercase">Tool</dt>
-            <dd className="font-mono text-neutral-200">{pendingAction.tool_name}</dd>
+            <dt className="text-muted mb-[2px] text-[11px] tracking-[0.08em] uppercase">Tool</dt>
+            <dd className="m-0 font-mono">{pendingAction.tool_name}</dd>
           </div>
-          <div>
-            <dt className="text-xs tracking-wide text-neutral-500 uppercase">Arguments</dt>
-            <dd>
-              <pre className="mt-1 overflow-x-auto font-mono text-xs text-neutral-300">
+          <div className="mt-[var(--space-2)]">
+            <dt className="text-muted mb-[2px] text-[11px] tracking-[0.08em] uppercase">
+              Arguments
+            </dt>
+            <dd className="m-0">
+              <pre className="m-0 overflow-x-auto font-mono text-xs whitespace-pre-wrap">
                 {JSON.stringify(pendingAction.tool_args, null, 2)}
               </pre>
             </dd>
           </div>
         </dl>
 
-        <label htmlFor="reject-reason" className="mt-4 block text-sm text-neutral-400">
-          Reason (only used if you reject)
-        </label>
-        <textarea
-          id="reject-reason"
-          value={reason}
-          onChange={(event) => setReason(event.target.value)}
-          disabled={submitting}
-          maxLength={2_000}
-          rows={2}
-          className="mt-1 w-full rounded border border-neutral-700 bg-neutral-950 p-2 text-sm text-neutral-200 disabled:opacity-50"
-          placeholder="Optional"
-        />
+        <div className="field">
+          <label htmlFor="reject-reason">Reason (only used if you reject)</label>
+          <textarea
+            id="reject-reason"
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            disabled={submitting}
+            maxLength={2_000}
+            rows={2}
+            className="input resize-y"
+            placeholder="Optional"
+          />
+        </div>
 
         {error && (
-          <p role="alert" className="mt-2 text-sm text-red-400">
+          <p role="alert" className="text-sm text-[var(--color-danger)]">
             {error}
           </p>
         )}
 
-        <div className="mt-4 flex justify-end gap-2">
+        <div className="flex justify-end gap-[var(--space-2)]">
           <button
             type="button"
             onClick={() => onReject(reason)}
             disabled={submitting}
-            className="rounded border border-red-800 px-3 py-1.5 text-sm text-red-300 hover:bg-red-950 disabled:opacity-50"
+            className="btn btn-secondary border-[var(--color-danger)] text-[var(--color-danger)]"
           >
             {submission === 'reject' ? 'Rejecting…' : 'Reject'}
           </button>
@@ -150,7 +154,7 @@ export function ApprovalModal({
             type="button"
             onClick={onApprove}
             disabled={submitting}
-            className="rounded bg-green-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-green-600 disabled:opacity-50"
+            className="btn btn-primary"
           >
             {submission === 'approve' ? 'Approving…' : 'Approve'}
           </button>

@@ -32,7 +32,7 @@ describe('BackendStatus', () => {
     })
     render(<BackendStatus />)
     const statusText = await screen.findByText(/Backend status: ready/)
-    expect(statusText).toHaveClass('text-green-500')
+    expect(statusText).toHaveClass('text-[var(--color-success)]')
     expect(screen.queryByRole('list')).not.toBeInTheDocument()
   })
 
@@ -54,10 +54,10 @@ describe('BackendStatus', () => {
     })
     render(<BackendStatus />)
     const statusText = await screen.findByText(/Backend status: degraded/)
-    expect(statusText).toHaveClass('text-amber-500')
+    expect(statusText).toHaveClass('text-[var(--color-warning)]')
     const missingList = screen.getByText('OpenRouter API key missing')
     expect(missingList).toBeInTheDocument()
-    expect(missingList.closest('ul')).toHaveClass('text-amber-500')
+    expect(missingList.closest('ul')).toHaveClass('text-[var(--color-warning)]')
   })
 
   it('shows not_ready in red and lists exactly the missing config keys', async () => {
@@ -75,12 +75,12 @@ describe('BackendStatus', () => {
     })
     render(<BackendStatus />)
     const statusText = await screen.findByText(/Backend status: not_ready/)
-    expect(statusText).toHaveClass('text-red-500')
+    expect(statusText).toHaveClass('text-[var(--color-danger)]')
     const missingItem = screen.getByText('OpenRouter API key missing')
     expect(missingItem).toBeInTheDocument()
     // The fix: the missing-checks list now matches the header's color
     // instead of always being amber regardless of status (flagged Day 1).
-    expect(missingItem.closest('ul')).toHaveClass('text-red-500')
+    expect(missingItem.closest('ul')).toHaveClass('text-[var(--color-danger)]')
     expect(screen.getByText('Supabase missing')).toBeInTheDocument()
     expect(screen.queryByText(/Gemini API key missing/)).not.toBeInTheDocument()
   })

@@ -41,7 +41,7 @@ export function BackendStatus() {
 
   if (status.state === 'loading') {
     return (
-      <p role="status" className="text-sm text-neutral-400">
+      <p role="status" className="text-muted text-sm">
         Checking backend connection…
       </p>
     )
@@ -49,7 +49,7 @@ export function BackendStatus() {
 
   if (status.state === 'error') {
     return (
-      <p role="alert" className="text-sm text-red-500">
+      <p role="alert" className="text-sm text-[var(--color-danger)]">
         Backend unreachable: {status.message}
       </p>
     )
@@ -62,9 +62,9 @@ export function BackendStatus() {
   // safety net is missing), so it reads as a distinct warning color, not
   // the same red as a genuinely broken "not_ready" deploy. See ADR-009.
   const statusColor: Record<typeof status.data.status, string> = {
-    ready: 'text-green-500',
-    degraded: 'text-amber-500',
-    not_ready: 'text-red-500',
+    ready: 'text-[var(--color-success)]',
+    degraded: 'text-[var(--color-warning)]',
+    not_ready: 'text-[var(--color-danger)]',
   }
 
   return (

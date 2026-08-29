@@ -11,19 +11,19 @@ const LABELS: Record<SessionStatus, string> = {
   failed: 'Failed',
 }
 
-const COLORS: Record<SessionStatus, string> = {
-  created: 'bg-neutral-800 text-neutral-300',
-  running: 'bg-blue-950 text-blue-300',
-  awaiting_approval: 'bg-amber-950 text-amber-300',
-  done: 'bg-green-950 text-green-300',
-  failed: 'bg-red-950 text-red-300',
+// Tag fills come from the Industry token sheet (see index.css) so the same
+// class carries the right tint in both themes.
+const TAG_CLASSES: Record<SessionStatus, string> = {
+  created: 'tag-neutral',
+  running: 'tag-accent',
+  awaiting_approval: 'tag-warning',
+  done: 'tag-success',
+  failed: 'tag-danger',
 }
 
-export function StatusBadge({ status }: { status: SessionStatus }) {
+export function StatusBadge({ status, className }: { status: SessionStatus; className?: string }) {
   return (
-    <span
-      className={`inline-block rounded px-2 py-0.5 text-xs font-medium whitespace-nowrap ${COLORS[status]}`}
-    >
+    <span className={`tag ${TAG_CLASSES[status]}${className ? ` ${className}` : ''}`}>
       {LABELS[status]}
     </span>
   )

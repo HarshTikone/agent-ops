@@ -1,1 +1,424 @@
 @import 'tailwindcss';
+
+/* ------------------------------------------------------------------ *
+ * Industry design tokens (design_handoff_agent_ops_redesign/README.md)
+ *
+ * Every color/space/radius/shadow in the UI comes from here. Components
+ * reference them through the component classes below or through Tailwind
+ * arbitrary values (`p-[var(--space-4)]`) — never as a duplicated literal.
+ * Light is the base sheet; `[data-theme='dark']` overrides only what the
+ * handoff says changes, and dark is the app's default (see index.html).
+ * ------------------------------------------------------------------ */
+:root {
+  color-scheme: light;
+
+  --font-body: 'Barlow', ui-sans-serif, system-ui, sans-serif;
+  --font-heading: 'Barlow Condensed', 'Barlow', ui-sans-serif, system-ui, sans-serif;
+
+  --color-bg: #f2f2f3;
+  --color-surface: #e9e9ea;
+  --color-text: #1d1f20;
+  --color-accent: #5980a6;
+  --color-divider: color-mix(in srgb, #1d1f20 16%, transparent);
+
+  --color-accent-100: #eef6ff;
+  --color-accent-200: #d6ebff;
+  --color-accent-300: #b5d9fd;
+  --color-accent-400: #94bce3;
+  --color-accent-500: #749dc4;
+  --color-accent-600: #597ea3;
+  --color-accent-700: #416180;
+  --color-accent-800: #2c455d;
+  --color-accent-900: #1d2d3d;
+
+  --color-neutral-100: #f5f5f8;
+  --color-neutral-200: #e7e7ea;
+  --color-neutral-300: #d4d4d7;
+  --color-neutral-400: #b7b7ba;
+  --color-neutral-500: #98989b;
+  --color-neutral-600: #7a7a7d;
+  --color-neutral-700: #5d5d60;
+  --color-neutral-800: #424244;
+  --color-neutral-900: #2b2b2d;
+
+  --color-success: #4f7d5c;
+  --color-success-100: #e8f0ea;
+  --color-success-800: #2f4f38;
+  --color-warning: #a97f34;
+  --color-warning-100: #f6ecd9;
+  --color-warning-800: #5c4318;
+  --color-danger: #a8564c;
+  --color-danger-100: #f6e4e1;
+  --color-danger-800: #5c2e29;
+
+  --space-1: 3.4px;
+  --space-2: 6.8px;
+  --space-3: 10.2px;
+  --space-4: 13.6px;
+  --space-6: 20.4px;
+  --space-8: 27.2px;
+
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 7px;
+
+  --shadow-sm: 0 1px 2px color-mix(in srgb, #1d1f20 10%, transparent);
+  --shadow-md: 0 3px 10px color-mix(in srgb, #1d1f20 14%, transparent);
+  --shadow-lg: 0 12px 32px color-mix(in srgb, #1d1f20 22%, transparent);
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --color-bg: #1b1d20;
+  --color-surface: #26282c;
+  --color-text: #eef0f2;
+  --color-divider: color-mix(in srgb, #eef0f2 18%, transparent);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 3px 10px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6);
+
+  --color-success: #7fb18d;
+  --color-warning: #d1a75f;
+  --color-danger: #d18a80;
+}
+
+@layer base {
+  html {
+    font-size: 15px;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    line-height: 1.55;
+    transition:
+      background 0.15s,
+      color 0.15s;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-heading);
+    font-weight: 600;
+    letter-spacing: 0.01em;
+  }
+
+  h1 {
+    font-size: 28px;
+    margin: 0;
+  }
+}
+
+@layer components {
+  .text-muted {
+    color: color-mix(in srgb, var(--color-text) 62%, transparent);
+  }
+
+  /* Buttons — square corners, per the Industry pattern sheet. */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: 7px var(--space-4);
+    border: 1px solid transparent;
+    border-radius: 0;
+    font-family: var(--font-body);
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1.2;
+    cursor: pointer;
+    transition:
+      background 0.12s,
+      color 0.12s,
+      border-color 0.12s;
+  }
+
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .btn:focus-visible,
+  .brand-link:focus-visible,
+  .blueprint > a:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  .brand-link {
+    color: var(--color-text);
+    font-family: var(--font-heading);
+    font-weight: 600;
+    text-decoration: none;
+  }
+
+  .btn-primary {
+    background: var(--color-accent);
+    color: var(--color-bg);
+  }
+
+  .btn-primary:not(:disabled):hover {
+    background: var(--color-accent-600);
+  }
+
+  .btn-primary:not(:disabled):active {
+    background: var(--color-accent-700);
+  }
+
+  [data-theme='dark'] .btn-primary {
+    color: var(--color-neutral-100);
+  }
+
+  [data-theme='dark'] .btn-primary:not(:disabled):hover {
+    background: var(--color-accent-400);
+  }
+
+  [data-theme='dark'] .btn-primary:not(:disabled):active {
+    background: var(--color-accent-300);
+  }
+
+  .btn-secondary {
+    background: transparent;
+    border-color: var(--color-divider);
+    color: var(--color-text);
+  }
+
+  .btn-secondary:not(:disabled):hover {
+    background: color-mix(in srgb, var(--color-text) 7%, transparent);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    color: var(--color-accent);
+  }
+
+  .btn-ghost:not(:disabled):hover {
+    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  }
+
+  .btn-icon {
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    flex: none;
+  }
+
+  .btn-icon-sm {
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    flex: none;
+  }
+
+  /* Tags — status pills. */
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: calc(var(--radius-md) * 0.75);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+
+  .tag-neutral {
+    background: var(--color-neutral-200);
+    color: var(--color-neutral-800);
+  }
+
+  .tag-accent {
+    background: var(--color-accent-100);
+    color: var(--color-accent-800);
+  }
+
+  .tag-success {
+    background: var(--color-success-100);
+    color: var(--color-success-800);
+  }
+
+  .tag-warning {
+    background: var(--color-warning-100);
+    color: var(--color-warning-800);
+  }
+
+  .tag-danger {
+    background: var(--color-danger-100);
+    color: var(--color-danger-800);
+  }
+
+  [data-theme='dark'] .tag-neutral {
+    background: color-mix(in srgb, var(--color-text) 14%, transparent);
+    color: var(--color-text);
+  }
+
+  [data-theme='dark'] .tag-accent {
+    background: color-mix(in srgb, var(--color-accent) 22%, transparent);
+    color: var(--color-accent-300);
+  }
+
+  [data-theme='dark'] .tag-success {
+    background: color-mix(in srgb, #7fb18d 20%, transparent);
+    color: #bfe0c7;
+  }
+
+  [data-theme='dark'] .tag-warning {
+    background: color-mix(in srgb, #d1a75f 20%, transparent);
+    color: #ecd4a5;
+  }
+
+  [data-theme='dark'] .tag-danger {
+    background: color-mix(in srgb, #d18a80 20%, transparent);
+    color: #f0c4bd;
+  }
+
+  /* Blueprint frame — hairline box with a registration crosshair at each
+     corner. Square corners only; the fill stays transparent so the page
+     background reads through (surface is reserved for bubbles/dialogs). */
+  .blueprint {
+    position: relative;
+    border: 1px solid var(--color-divider);
+    border-radius: 0;
+    background: transparent;
+  }
+
+  .corner {
+    position: absolute;
+    width: 11px;
+    height: 11px;
+    color: var(--color-accent);
+    opacity: 0.6;
+    pointer-events: none;
+  }
+
+  .corner::before,
+  .corner::after {
+    content: '';
+    position: absolute;
+    background: currentColor;
+  }
+
+  .corner::before {
+    top: 50%;
+    left: 0;
+    right: 0;
+    height: 1px;
+  }
+
+  .corner::after {
+    left: 50%;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+  }
+
+  .corner-tl {
+    top: -6px;
+    left: -6px;
+  }
+
+  .corner-tr {
+    top: -6px;
+    right: -6px;
+  }
+
+  .corner-bl {
+    bottom: -6px;
+    left: -6px;
+  }
+
+  .corner-br {
+    bottom: -6px;
+    right: -6px;
+  }
+
+  .card-kicker {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--color-accent);
+  }
+
+  .card-title {
+    font-family: var(--font-heading);
+    font-weight: 600;
+    font-size: 17px;
+    line-height: 1.25;
+    margin: 0;
+  }
+
+  .card-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 12px;
+    color: color-mix(in srgb, var(--color-text) 62%, transparent);
+  }
+
+  .input {
+    width: 100%;
+    background: transparent;
+    border: 1px solid var(--color-divider);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: 14px;
+  }
+
+  .input:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: -1px;
+  }
+
+  .input:disabled {
+    opacity: 0.5;
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .field > label {
+    font-size: 13px;
+    color: color-mix(in srgb, var(--color-text) 62%, transparent);
+  }
+
+  .pulse-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: agent-ops-pulse 1.4s ease-in-out infinite;
+  }
+
+  @keyframes agent-ops-pulse {
+    0%,
+    100% {
+      opacity: 0.3;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

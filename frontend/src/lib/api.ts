@@ -11,17 +11,31 @@ export const API_BASE_URL = configuredApiUrl?.replace(/\/$/, '') ?? 'http://loca
 const OPERATOR_KEY_STORAGE = 'agent-ops.operator-key'
 
 export function getOperatorKey(): string {
-  return sessionStorage.getItem(OPERATOR_KEY_STORAGE)?.trim() ?? ''
+  try {
+    return sessionStorage.getItem(OPERATOR_KEY_STORAGE)?.trim() ?? ''
+  } catch {
+    // Storage can be unavailable in privacy-restricted contexts. Treat that
+    // exactly like an unset runtime key instead of crashing the whole header.
+    return ''
+  }
 }
 
 export function setOperatorKey(key: string): void {
   const normalized = key.trim()
-  if (normalized) sessionStorage.setItem(OPERATOR_KEY_STORAGE, normalized)
-  else sessionStorage.removeItem(OPERATOR_KEY_STORAGE)
+  try {
+    if (normalized) sessionStorage.setItem(OPERATOR_KEY_STORAGE, normalized)
+    else sessionStorage.removeItem(OPERATOR_KEY_STORAGE)
+  } catch {
+    // The mutation request will still fail closed without a readable key.
+  }
 }
 
 export function clearOperatorKey(): void {
-  sessionStorage.removeItem(OPERATOR_KEY_STORAGE)
+  try {
+    sessionStorage.removeItem(OPERATOR_KEY_STORAGE)
+  } catch {
+    // Clearing an unavailable store is already the desired end state.
+  }
 }
 
 export interface ReadinessChecks {

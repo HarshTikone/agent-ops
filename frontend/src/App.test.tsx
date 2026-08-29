@@ -13,9 +13,9 @@ describe('App', () => {
     )
   })
 
-  it('renders the Agent Ops heading', () => {
+  it('renders a home link for the Agent Ops brand', () => {
     render(<App />)
-    expect(screen.getByRole('heading', { name: 'Agent Ops' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Agent Ops home' })).toHaveAttribute('href', '/')
   })
 
   it('renders a useful not-found page for an unknown route', () => {

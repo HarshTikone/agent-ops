@@ -22,15 +22,18 @@ export class AppErrorBoundary extends Component<Props, State> {
   render() {
     if (this.state.failed) {
       return (
-        <main className="mx-auto max-w-2xl px-4 py-12" role="alert">
-          <h1 className="text-xl font-semibold text-red-300">Something went wrong</h1>
-          <p className="mt-2 text-sm text-neutral-400">
+        <main
+          className="mx-auto max-w-[1120px] px-[var(--space-6)] py-[var(--space-8)]"
+          role="alert"
+        >
+          <h1 className="text-[var(--color-danger)]">Something went wrong</h1>
+          <p className="text-muted mt-[var(--space-2)] text-sm">
             The interface could not continue safely. Reload to restore the latest persisted state.
           </p>
           <button
             type="button"
             onClick={() => window.location.reload()}
-            className="mt-4 rounded bg-blue-700 px-4 py-2 text-sm font-medium text-white hover:bg-blue-600"
+            className="btn btn-primary mt-[var(--space-4)]"
           >
             Reload application
           </button>

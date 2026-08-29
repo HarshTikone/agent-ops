@@ -1,8 +1,9 @@
 # Sprint 03 — Release Candidate and Public Demo
 
-> **Status: implementation in progress (2026-08-28).** Local release-candidate
-> changes are implemented. Public deployment and live acceptance evidence are
-> still required before this sprint can be marked complete.
+> **Status: release verification in progress (2026-08-29).** The backend and
+> initial frontend are public, production migrations are current, and the
+> frontend redesign has passed local review. The redesigned build still needs
+> redeployment plus final public CORS and approval/rejection acceptance evidence.
 
 ## Goal and constraints
 
@@ -47,15 +48,15 @@ domain work is included.
 - [x] ADR-022 through ADR-024 close the deferred decision-record gaps.
 - [x] Pre-commit hooks are cross-platform and check only changed files.
 - [x] Full local validation matrix passes after the final diff.
-- [ ] Independent review has no unresolved actionable P1/P2 findings.
+- [x] Independent review has no unresolved actionable P1/P2 findings.
 
 ### Public release evidence
 
-- [ ] Production migration run recorded (command, migration output, timestamp).
-- [ ] Render backend URL: _pending provider authentication/deployment_.
-- [ ] Render `/health`: _pending_.
-- [ ] Render `/health/ready`: _pending_.
-- [ ] Vercel frontend URL: _pending provider authentication/deployment_.
+- [x] Production migration run recorded (command, migration output, timestamp).
+- [x] Render backend URL: <https://agent-ops-api-jcgc.onrender.com>.
+- [x] Render `/health`: healthy on 2026-08-29.
+- [x] Render `/health/ready`: ready on 2026-08-29.
+- [x] Vercel frontend URL: <https://agent-ops-sage.vercel.app>.
 - [ ] Exact-origin CORS and unauthenticated mutation checks recorded.
 - [ ] Approval walkthrough recorded: task → pause → approve → trace → final.
 - [ ] Rejection walkthrough recorded and persists after refresh.
@@ -102,4 +103,9 @@ domain work is included.
 | Container HTTP smoke | Passed | `/health` ok; dependency-free `/ready` reported `not_ready` |
 | Frontend full matrix | Passed | ESLint, Prettier, strict TypeScript, 72 tests, Vite build |
 | Missing production URL | Passed | Explicit empty `VITE_API_URL` makes Vite build exit 1 |
-| Public deployment and E2E | Pending | Requires provider access |
+| Frontend redesign review | Passed | ESLint, Prettier, strict TypeScript, 80 tests, production Vite build, dark/light visual review on 2026-08-29 |
+| Redesign reliability checks | Passed | Persistent local hide with Undo, keyboard/focus behavior, storage failure handling, and token-based status colors |
+| Current backend regression | Passed | Ruff, mypy (36 source files), 116 passed, 39 database-dependent skipped, 1 live test deselected |
+| Production migration | Passed | Release image applied 0003 and 0004 on 2026-08-29; immediate repeat skipped 0001–0004 |
+| Public schema smoke | Passed | Public session detail and structured trace endpoint succeeded after migration |
+| Redesigned frontend deployment and E2E | Pending | Commit/push, exact-origin CORS save, and public approval/rejection walkthrough remain |
