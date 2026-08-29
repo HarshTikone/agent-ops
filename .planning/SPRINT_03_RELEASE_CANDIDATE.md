@@ -1,10 +1,9 @@
 # Sprint 03 — Release Candidate and Public Demo
 
-> **Status: production QA in progress (2026-08-29).** The backend and frontend
-> are public and production migrations are current. The two P2 QA findings are
-> fixed in production. The final security-header/accessibility remediation is
-> locally verified and awaiting deployment; operator-key approval/rejection
-> acceptance and durable screenshot evidence remain before sprint completion.
+> **Status: complete (2026-08-29).** The release candidate is deployed, the
+> production schema is current, all local gates pass, and the public approval
+> and rejection workflows have been exercised through persisted terminal
+> states. Sanitized screenshots were captured in the release task output.
 
 ## Goal and constraints
 
@@ -59,9 +58,10 @@ domain work is included.
 - [x] Render `/health/ready`: ready on 2026-08-29.
 - [x] Vercel frontend URL: <https://agent-ops-sage.vercel.app>.
 - [x] Exact-origin CORS and unauthenticated mutation checks recorded.
-- [ ] Approval walkthrough recorded: task → pause → approve → trace → final.
-- [ ] Rejection walkthrough recorded and persists after refresh.
-- [ ] Screenshots added without exposing the operator key or provider secrets.
+- [x] Approval walkthrough recorded: task → pause → approve → trace → final.
+- [x] Rejection walkthrough recorded and persists after refresh.
+- [x] Screenshots captured without exposing the operator key or provider
+  secrets.
 
 ## Release procedure
 
@@ -109,11 +109,12 @@ domain work is included.
 | Current backend regression | Passed | Ruff, mypy (36 source files), 116 passed, 39 database-dependent skipped, 1 live test deselected |
 | Production migration | Passed | Release image applied 0003 and 0004 on 2026-08-29; immediate repeat skipped 0001–0004 |
 | Public schema smoke | Passed | Public session detail and structured trace endpoint succeeded after migration |
-| Vercel redesign deployment | Passed | Production serves QA-remediation commit `8ff2217` at <https://agent-ops-sage.vercel.app> |
+| Vercel redesign deployment | Passed | Production serves security/accessibility commit `85ec975` at <https://agent-ops-sage.vercel.app> |
 | Render CORS deployment | Passed | Deploy `dep-da97kg2jnfac73cussd0` succeeded for commit `a942c8d`; exact origin is `https://agent-ops-sage.vercel.app` |
 | Production security smoke | Passed | Allowed preflight 200 with exact origin; disallowed origin 400 without allow-origin header; unauthenticated `POST /sessions` 401 |
 | Public redesigned UI smoke | Passed | Readiness displayed as ready; session list, detail, and trace empty state loaded through Vercel |
-| Redesigned frontend E2E | Pending | Operator-key approval/rejection walkthrough and durable screenshots remain |
+| Redesigned frontend E2E | Passed | Approval session `c1681a91-2be2-48e2-8a25-11ec287265ea` reached Done with an APPROVED write trace; rejection session `aba89b01-74f1-4c93-96f1-6ae7874a46f7` recorded two REJECTED decisions, no successful tool call, and a persisted Failed terminal state. Sanitized screenshots were captured. |
+| Final unauthenticated mutation check | Passed | After clearing the session-stored operator key, New session was blocked with the expected credential alert and created no session. |
 
 ## Production QA review — 2026-08-29
 
@@ -122,7 +123,7 @@ Supabase production database.
 
 | Area | Result | Evidence / review |
 |---|---|---|
-| Deployment version | Pass | Vercel serves frontend commit `8ff2217`; the Render API remains healthy with the release backend. |
+| Deployment version | Pass | Vercel and Render serve commit `85ec975`; the Render API remains healthy with the release backend. |
 | Free-tier cold start | Pass | The UI retained accessible loading states and recovered to `Backend status: ready` with live sessions after about 30 seconds. |
 | API health and readiness | Pass | `/health` and `/health/ready` returned 200. |
 | CORS boundary | Pass | Exact Vercel-origin preflight returned 200 with the matching allow-origin header; an unrelated origin returned 400 without that header. |
@@ -133,11 +134,12 @@ Supabase production database.
 | Invalid/missing session errors | Pass | Malformed and unknown session URLs rendered concise accessible alerts while retaining navigation back to all sessions. |
 | Session soft-hide | **Fixed — Pass** | Production exposed “Show all hidden sessions” for the QA-hidden row; restoring it and refreshing kept the session visible. Focused and full regression suites pass. |
 | Repository formatting gate | **Fixed — Pass** | The project Prettier check now exits 0 across the complete frontend tree. |
-| Security response headers | Remediation ready | Strict CSP without `unsafe-inline`, anti-sniffing, framing, referrer, and permissions policies are configured and protected by regression tests; public verification follows deployment. |
+| Security response headers | **Fixed — Pass** | Production returns a strict CSP without `unsafe-inline`, plus anti-sniffing, framing, referrer, and permissions policies. The external theme bootstrap loads successfully under that policy. |
 | Heading hierarchy | **Fixed — Pass** | Session card titles are level-two headings beneath the Sessions H1 and have explicit component coverage. |
 | Hide-action naming | **Fixed — Pass** | The accessible name now states that the session is hidden on this device and matches the non-destructive behavior. |
 | Frontend lint | Pass | `npm run lint` exited 0. |
 | Frontend component suite | Pass | 14 files and 83 tests passed. |
 | Production bundle | Pass | TypeScript and Vite production build passed; JavaScript bundle was 252.71 kB (80.00 kB gzip), with no secret-name or source-map matches. |
 | Existing production session | Resolved | A conditional one-row recovery marked session `AA4F` failed only because it was still running and more than one hour stale; no data was deleted. |
-| Approval and rejection acceptance | Blocked | Requires the dashboard-configured operator key to be entered manually in the public frontend; the secret was not read or exposed during QA. |
+| Approval and rejection acceptance | Pass | With the dashboard-configured operator key saved only in session storage, approval session `…65ea` completed its protected note write and persisted after refresh. Rejection session `…46f7` rejected the original action and its single bounded replan, executed no write, exhausted the replan budget, and persisted after refresh. Escape did not dismiss the blocking dialog and initial focus landed on its heading. The key was cleared after verification. |
+| Provider configuration recovery | Pass | The first live run exposed an invalid Render `GEMINI_API_KEY` despite presence-only readiness reporting. The dashboard value was replaced without disclosure, Render redeployed, and fresh Gemini planning/finalization calls then succeeded. |
