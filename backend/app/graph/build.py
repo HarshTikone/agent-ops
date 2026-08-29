@@ -12,6 +12,9 @@ that ever calls `interrupt()`.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any, cast
+
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -38,6 +41,7 @@ def build_graph(
     langchain_tools: list,
     *,
     checkpointer: BaseCheckpointSaver | None = None,
+    on_irreversible_tool_attempt: Callable[[], None] | None = None,
 ) -> CompiledStateGraph:
     """`checkpointer` is what makes the approval pause survive across two
     separate HTTP requests (ADR-014) -- omit it (e.g. in Day 2-style unit
@@ -46,13 +50,13 @@ def build_graph(
     """
     graph = StateGraph(GraphState)
 
-    graph.add_node("planner", make_planner_node(llm, langchain_tools))
+    graph.add_node("planner", cast(Any, make_planner_node(llm, langchain_tools)))
     graph.add_node("delegate", delegate_node)
     graph.add_node("approval_gate", approval_gate_node)
-    graph.add_node("tool_call", make_tool_call_node(tools))
+    graph.add_node("tool_call", cast(Any, make_tool_call_node(tools, on_irreversible_tool_attempt)))
     graph.add_node("observe", observe_node)
     graph.add_node("decide_next", decide_next_node)
-    graph.add_node("finalize", make_finalize_node(llm))
+    graph.add_node("finalize", cast(Any, make_finalize_node(llm)))
 
     graph.add_edge(START, "planner")
     graph.add_conditional_edges("planner", route_after_planner, {"delegate": "delegate", END: END})

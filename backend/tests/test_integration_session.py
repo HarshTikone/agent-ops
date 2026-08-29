@@ -22,19 +22,41 @@ Two complementary tests:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from app import repository as repo
-from app.db import get_checkpointer
+from app.db import create_checkpointer, get_checkpointer, get_db_pool
 from app.graph.build import build_graph
 from app.graph.state import initial_state
 from app.llm.base import LLMResponse, ToolCallRequest
 from app.main import app
+from app.rate_limit import limiter
+from app.resources import get_http_client
+from app.security import require_operator_key
 from app.session_runner import _apply_result
 from app.tools.errors import ToolError
 from app.tools.registry import build_tool_registry, to_langchain_tools
+
+
+@pytest.fixture(autouse=True)
+def _wire_application_resources(db_pool):
+    """Integration requests reuse the real fixture pool without app startup."""
+    client = httpx.Client(timeout=15)
+    checkpointer = create_checkpointer(db_pool)
+    app.dependency_overrides[get_db_pool] = lambda: db_pool
+    app.dependency_overrides[get_checkpointer] = lambda: checkpointer
+    app.dependency_overrides[get_http_client] = lambda: client
+    app.dependency_overrides[require_operator_key] = lambda: None
+    limiter.reset()
+    yield
+    limiter.reset()
+    client.close()
+    app.dependency_overrides.clear()
 
 
 class _ScriptedLLM:
@@ -63,6 +85,7 @@ def test_list_sessions_endpoint_returns_most_recent_first(db_pool) -> None:
             conn.execute("DELETE FROM sessions WHERE id IN (%s, %s)", (older["id"], newer["id"]))
 
 
+@pytest.mark.live
 def test_full_session_through_the_real_api_including_approval(db_pool) -> None:
     client = TestClient(app)
 
@@ -138,7 +161,7 @@ def test_full_session_through_the_real_api_including_approval(db_pool) -> None:
         # cascade on delete, but the checkpointer's own tables are keyed by
         # thread_id, not a foreign key into `sessions` — orphaned otherwise
         # (a real gap for production too, see ADR-014's "what we gave up").
-        get_checkpointer().delete_thread(str(session_id))
+        create_checkpointer(db_pool).delete_thread(str(session_id))
 
 
 class _FlakyCalculator:
@@ -152,7 +175,7 @@ class _FlakyCalculator:
     def __init__(self) -> None:
         self.calls = 0
 
-    def run(self, **kwargs) -> str:
+    def invoke(self, arguments: dict[str, object]) -> str:
         self.calls += 1
         if self.calls == 1:
             raise ToolError("simulated transient network blip", transient=True)
@@ -181,7 +204,7 @@ def test_forced_transient_failure_retries_and_persists_correctly(db_pool) -> Non
                 LLMResponse(content="the answer is 4", tool_calls=[], provider="gemini"),
             ]
         )
-        graph = build_graph(llm, tools, langchain_tools, checkpointer=get_checkpointer())
+        graph = build_graph(llm, tools, langchain_tools, checkpointer=create_checkpointer(db_pool))
         config = {"configurable": {"thread_id": str(session_id)}}
 
         repo.start_session(db_pool, session_id, task="compute 2+2")
@@ -205,7 +228,7 @@ def test_forced_transient_failure_retries_and_persists_correctly(db_pool) -> Non
     finally:
         with db_pool.connection() as conn:
             conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
-        get_checkpointer().delete_thread(str(session_id))
+        create_checkpointer(db_pool).delete_thread(str(session_id))
 
 
 class _RaisingProvider:
@@ -215,6 +238,25 @@ class _RaisingProvider:
 
     def generate(self, messages, tools=None):
         raise RuntimeError("simulated provider crash")
+
+
+def _approval_provider(*, key: str = "k", content: str = "v") -> _ScriptedLLM:
+    return _ScriptedLLM(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="approval-step",
+                        name="notes_store",
+                        arguments={"action": "write", "key": key, "content": content},
+                    )
+                ],
+                provider="test",
+            ),
+            LLMResponse(content="saved", tool_calls=[], provider="test"),
+        ]
+    )
 
 
 def test_provider_crash_during_send_message_leaves_session_failed_not_stuck(db_pool) -> None:
@@ -230,10 +272,6 @@ def test_provider_crash_during_send_message_leaves_session_failed_not_stuck(db_p
     app.dependency_overrides[get_llm_provider] = lambda: _RaisingProvider()
     try:
         response = client.post(f"/sessions/{session_id}/messages", json={"content": "do something"})
-    finally:
-        del app.dependency_overrides[get_llm_provider]
-
-    try:
         assert response.status_code == 502
         assert "detail" in response.json()
 
@@ -250,9 +288,10 @@ def test_provider_crash_during_send_message_leaves_session_failed_not_stuck(db_p
         events = repo.list_trace_events(db_pool, session_id)
         assert any(e["node"] == "system" and "CRASH" in e["detail"] for e in events)
     finally:
+        del app.dependency_overrides[get_llm_provider]
         with db_pool.connection() as conn:
             conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
-        get_checkpointer().delete_thread(str(session_id))
+        create_checkpointer(db_pool).delete_thread(str(session_id))
 
 
 def test_add_message_failure_leaves_session_failed_not_stuck(db_pool) -> None:
@@ -263,6 +302,10 @@ def test_add_message_failure_leaves_session_failed_not_stuck(db_pool) -> None:
     'running' with no retry path."""
     client = TestClient(app)
     session_id = client.post("/sessions").json()["id"]
+
+    from app.dependencies import get_llm_provider
+
+    app.dependency_overrides[get_llm_provider] = lambda: _RaisingProvider()
 
     try:
         with patch(
@@ -285,9 +328,10 @@ def test_add_message_failure_leaves_session_failed_not_stuck(db_pool) -> None:
         events = repo.list_trace_events(db_pool, session_id)
         assert any(e["node"] == "system" and "CRASH" in e["detail"] for e in events)
     finally:
+        del app.dependency_overrides[get_llm_provider]
         with db_pool.connection() as conn:
             conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
-        get_checkpointer().delete_thread(str(session_id))
+        create_checkpointer(db_pool).delete_thread(str(session_id))
 
 
 def test_mark_executed_failure_leaves_session_failed_not_stranded(db_pool) -> None:
@@ -300,6 +344,10 @@ def test_mark_executed_failure_leaves_session_failed_not_stranded(db_pool) -> No
     happen is the session staying wedged at 'awaiting_approval' forever."""
     client = TestClient(app)
     session_id = client.post("/sessions").json()["id"]
+
+    from app.dependencies import get_llm_provider
+
+    app.dependency_overrides[get_llm_provider] = lambda: _approval_provider(key="k2", content="v2")
     sent = client.post(
         f"/sessions/{session_id}/messages",
         json={"content": "Save a note with key 'k2' and content 'v2', using the notes tool."},
@@ -309,7 +357,7 @@ def test_mark_executed_failure_leaves_session_failed_not_stranded(db_pool) -> No
 
     try:
         with patch(
-            "app.api.approvals.repo.mark_pending_action_executed",
+            "app.session_runner.repo.mark_pending_action_executed",
             side_effect=RuntimeError("simulated db blip"),
         ):
             response = client.post(f"/approvals/{pending_action_id}/approve")
@@ -329,9 +377,10 @@ def test_mark_executed_failure_leaves_session_failed_not_stranded(db_pool) -> No
         events = repo.list_trace_events(db_pool, session_id)
         assert any(e["node"] == "system" and "CRASH" in e["detail"] for e in events)
     finally:
+        del app.dependency_overrides[get_llm_provider]
         with db_pool.connection() as conn:
             conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
-        get_checkpointer().delete_thread(str(session_id))
+        create_checkpointer(db_pool).delete_thread(str(session_id))
 
 
 def test_provider_crash_during_resume_leaves_session_failed_and_action_executed(db_pool) -> None:
@@ -343,6 +392,7 @@ def test_provider_crash_during_resume_leaves_session_failed_and_action_executed(
 
     client = TestClient(app)
     session_id = client.post("/sessions").json()["id"]
+    app.dependency_overrides[get_llm_provider] = lambda: _approval_provider()
     sent = client.post(
         f"/sessions/{session_id}/messages",
         json={"content": "Save a note with key 'k' and content 'v', using the notes tool."},
@@ -370,4 +420,126 @@ def test_provider_crash_during_resume_leaves_session_failed_and_action_executed(
     finally:
         with db_pool.connection() as conn:
             conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
-        get_checkpointer().delete_thread(str(session_id))
+        create_checkpointer(db_pool).delete_thread(str(session_id))
+
+
+def test_apply_result_rolls_back_every_write_when_status_update_fails(db_pool) -> None:
+    session = repo.create_session(db_pool, task="transaction rollback")
+    session_id = session["id"]
+    result = {
+        "status": "done",
+        "final_answer": "finished",
+        "trace": [
+            {
+                "sequence": 1,
+                "node": "finalize",
+                "detail": "provider=test",
+                "level": "success",
+                "provider": "test",
+            }
+        ],
+    }
+
+    try:
+        with (
+            patch(
+                "app.session_runner.repo.update_session_status_on_connection",
+                side_effect=RuntimeError("simulated final write failure"),
+            ),
+            pytest.raises(RuntimeError, match="simulated final write failure"),
+        ):
+            _apply_result(db_pool, session_id, result)
+
+        assert repo.list_trace_events(db_pool, session_id) == []
+        assert repo.list_messages(db_pool, session_id) == []
+        assert repo.get_session(db_pool, session_id)["status"] == "running"
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+
+
+def test_apply_result_rejects_nonterminal_graph_exit_and_rolls_back_trace(db_pool) -> None:
+    session = repo.create_session(db_pool, task="invalid graph exit")
+    session_id = session["id"]
+    result = {
+        "status": "running",
+        "trace": [
+            {
+                "sequence": 1,
+                "node": "planner",
+                "detail": "unexpected exit",
+                "level": "error",
+                "provider": None,
+            }
+        ],
+    }
+
+    try:
+        with pytest.raises(RuntimeError, match="without an interrupt or terminal status"):
+            _apply_result(db_pool, session_id, result)
+        assert repo.list_trace_events(db_pool, session_id) == []
+        assert repo.get_session(db_pool, session_id)["status"] == "running"
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+
+
+def test_apply_result_rolls_back_pending_action_when_status_update_fails(db_pool) -> None:
+    session = repo.create_session(db_pool, task="approval rollback")
+    session_id = session["id"]
+    result = {
+        "trace": [],
+        "__interrupt__": [
+            SimpleNamespace(
+                value={
+                    "tool_name": "notes_store",
+                    "tool_args": {"action": "write", "key": "k", "content": "v"},
+                }
+            )
+        ],
+    }
+
+    try:
+        with (
+            patch(
+                "app.session_runner.repo.update_session_status_on_connection",
+                side_effect=RuntimeError("simulated status failure"),
+            ),
+            pytest.raises(RuntimeError, match="simulated status failure"),
+        ):
+            _apply_result(db_pool, session_id, result)
+
+        assert repo.get_pending_action_for_session(db_pool, session_id) is None
+        assert repo.get_session(db_pool, session_id)["status"] == "running"
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+
+
+def test_resume_failure_before_tool_attempt_leaves_action_approved(db_pool) -> None:
+    from app.dependencies import get_llm_provider
+
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["id"]
+    app.dependency_overrides[get_llm_provider] = lambda: _approval_provider()
+    sent = client.post(
+        f"/sessions/{session_id}/messages",
+        json={"content": "Save a note with key 'k' and content 'v'."},
+    )
+    pending_action_id = sent.json()["pending_action"]["id"]
+
+    try:
+        with patch(
+            "app.api.approvals.resume_session_run",
+            side_effect=RuntimeError("checkpoint unavailable"),
+        ):
+            response = client.post(f"/approvals/{pending_action_id}/approve")
+
+        assert response.status_code == 502
+        assert repo.get_pending_action(db_pool, pending_action_id)["status"] == "approved"
+        assert repo.get_session(db_pool, session_id)["status"] == "failed"
+    finally:
+        del app.dependency_overrides[get_llm_provider]
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+        create_checkpointer(db_pool).delete_thread(str(session_id))

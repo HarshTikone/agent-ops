@@ -45,6 +45,11 @@ def test_missing_api_key_raises_permanent_tool_error_without_a_network_call() ->
     assert exc_info.value.transient is False
 
 
+def test_query_schema_rejects_whitespace_only_input() -> None:
+    with pytest.raises(ValueError, match="search query must not be blank"):
+        WebSearchTool(api_key="test-key").invoke({"query": "   "})
+
+
 def test_successful_search_formats_results() -> None:
     tool = _tool_with_response(
         200,
@@ -82,6 +87,18 @@ def test_connection_failure_is_a_transient_tool_error() -> None:
     assert exc_info.value.transient is True
 
 
+@pytest.mark.parametrize(
+    "error_type",
+    [httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError],
+)
+def test_other_transport_failures_are_transient(error_type) -> None:
+    request = httpx.Request("POST", "https://api.tavily.com/search")
+    tool = _tool_raising(error_type("transport failed", request=request))
+    with pytest.raises(ToolError) as exc_info:
+        tool.run(query="anything")
+    assert exc_info.value.transient is True
+
+
 def test_rate_limit_is_a_transient_tool_error() -> None:
     tool = _tool_with_response(429, text="rate limited")
     with pytest.raises(ToolError) as exc_info:
@@ -101,6 +118,7 @@ def test_bad_request_is_a_permanent_tool_error() -> None:
     with pytest.raises(ToolError) as exc_info:
         tool.run(query="anything")
     assert exc_info.value.transient is False
+    assert "malformed query" not in str(exc_info.value)
 
 
 def test_malformed_json_response_is_a_permanent_tool_error() -> None:

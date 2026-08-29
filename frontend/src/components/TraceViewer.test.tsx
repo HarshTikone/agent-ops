@@ -7,8 +7,10 @@ function event(overrides: Partial<TraceEvent>): TraceEvent {
   return {
     id: 1,
     session_id: 's1',
+    sequence: 1,
     node: 'planner',
     detail: 'provider=gemini steps=[]',
+    level: 'info',
     provider: null,
     created_at: '2026-08-24T00:00:00Z',
     ...overrides,
@@ -45,6 +47,15 @@ describe('TraceViewer', () => {
   it('does not show a provider tag when absent', () => {
     render(<TraceViewer events={[event({ provider: null })]} />)
     expect(screen.queryByText(/^via /)).not.toBeInTheDocument()
+  })
+
+  it('uses the structured level before the legacy detail-text fallback', () => {
+    render(
+      <TraceViewer
+        events={[event({ level: 'error', detail: 'neutral wording with no legacy marker' })]}
+      />,
+    )
+    expect(screen.getByRole('listitem')).toHaveAttribute('data-tone', 'error')
   })
 
   it('colors a transient tool failure as a warning, not an error', () => {

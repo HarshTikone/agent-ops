@@ -236,3 +236,42 @@ raising repository call via `unittest.mock.patch` and assert the session
 lands on `failed` with a trace row and a 502 — both were mutation-tested by
 reverting the fix and confirming they fail by name first. Full suite: 129
 passed (127 + 2 new); `ruff check .` and `black --check .` clean.
+
+---
+
+# Release-candidate review — 2026-08-28
+
+**Scope:** complete working tree against merge base `d4df774`, covering the
+Sprint 02 security baseline and Sprint 03 release-candidate changes. This was a
+separate primary-agent review pass; the repository's stricter independent
+reviewer-subagent gate remains intentionally unchecked.
+
+**Method:** inspected the complete diff and changed runtime paths, ran
+`git diff --check`, exercised migrations twice against an isolated pgvector
+Postgres container, ran 155 backend tests, full Ruff/Black/mypy, the frontend
+lint/format/type/test/build matrix, and backend image/liveness checks.
+
+## Findings fixed during review
+
+### [P1] Global fallback logged raw exception text
+
+The new generic 500 response hid implementation details from clients, but its
+initial logger call attached the raw exception traceback. An upstream exception
+could therefore move a credential from a response body into logs. The handler
+now sends its formatted traceback through `sanitize_error`, and its regression
+test proves an `api_key=...` value is redacted in both response and captured
+logs.
+
+### [P2] A corrupted pending-action invariant could duplicate session rows
+
+The initial `LEFT JOIN` assumed at most one pending action per session, but the
+database only has a partial non-unique index. The query now uses a lateral
+`LEFT JOIN` ordered by creation time with `LIMIT 1`, preserving one session row
+even if legacy or concurrent data violates the application invariant.
+
+## Result
+
+No unresolved actionable P1/P2 findings remain in this review pass. Public
+Render/Vercel deployment, live CORS/security checks, live approval/rejection
+walkthroughs, and the separate reviewer-subagent gate remain open and are not
+claimed as complete.

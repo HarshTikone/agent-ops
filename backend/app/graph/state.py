@@ -10,8 +10,32 @@ from app.llm.base import ToolCallRequest
 
 
 class TraceEvent(TypedDict):
+    sequence: int
     node: str
     detail: str
+    level: Literal["info", "success", "warning", "error"]
+    provider: str | None
+
+
+TraceLevel = Literal["info", "success", "warning", "error"]
+
+
+def new_trace_event(
+    state: GraphState,
+    *,
+    node: str,
+    detail: str,
+    level: TraceLevel = "info",
+    provider: str | None = None,
+) -> TraceEvent:
+    """Create the next durable event in a session's monotonic trace."""
+    return TraceEvent(
+        sequence=len(state["trace"]) + 1,
+        node=node,
+        detail=detail,
+        level=level,
+        provider=provider,
+    )
 
 
 NextAction = Literal["advance", "retry", "replan", "finalize", "give_up"]

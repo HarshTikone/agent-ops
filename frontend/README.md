@@ -1,32 +1,44 @@
-# React + TypeScript + Vite
+# Agent Ops frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React, TypeScript, Vite, and Tailwind interface for the Agent Ops backend. It
+shows persisted sessions and traces, accepts the single operator key at
+runtime, and presents irreversible tool calls as blocking approval dialogs.
 
-Currently, two official plugins are available:
+## Local development
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install
+cp .env.example .env
+npm run dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+`VITE_API_URL` is optional during development and defaults to
+`http://localhost:8000`. Production builds intentionally fail when it is
+missing. The operator key is never a Vite variable: enter it in the running
+application, where it is kept in `sessionStorage` for the current tab.
+
+## Checks
+
+```bash
+npm run lint
+npm run format:check
+npm test
+VITE_API_URL=https://api.example.invalid npm run build
+```
+
+The test suite covers routing, API behavior, approval focus management,
+keyboard controls, cancellation, trace presentation, and error recovery.
+
+## Vercel deployment
+
+1. Import this repository and set the Vercel project Root Directory to
+   `frontend`.
+2. Add `VITE_API_URL` to Production and Preview environments with the exact
+   HTTPS origin of the Render backend.
+3. Deploy. `vercel.json` builds `dist/` and rewrites deep links to
+   `index.html` for React Router.
+4. Add the generated Vercel production origin to the backend's
+   `CORS_ORIGINS`, then redeploy the backend.
+
+Changing `VITE_API_URL` requires a new frontend deployment because Vite embeds
+it at build time. Never configure backend or operator secrets in Vercel.

@@ -13,11 +13,10 @@ change gave the runner real `GEMINI_API_KEY`/etc. for the DB-backed tests —
 `SETTINGS_ENV_VAR_NAMES` + `monkeypatch.delenv` below is what actually
 closes it, not `_env_file=None` alone.
 
-Exception: the DB-backed fixtures below (`db_pool`, `session_row`) DO read
-the real `.env` / CI's real `DATABASE_URL` secret and hit the real Supabase
-project (ADR-014) — unlike the LLM providers, Postgres isn't rate-limited
-the way OpenRouter is, and a repository/API layer test suite that never
-touches a real database isn't actually testing the persistence layer.
+Exception: the DB-backed fixtures below (`db_pool`, `session_row`) read
+`DATABASE_URL`. CI points it at a fresh PostgreSQL service container; local
+development may point it at a developer database. Externally hosted provider
+tests are marked `live` and excluded from the default suite.
 """
 
 import pytest
@@ -27,6 +26,7 @@ from psycopg_pool import ConnectionPool
 
 from app import repository as repo
 from app.config import Settings, get_settings
+from app.db import get_optional_db_pool
 from app.main import app
 
 # Derived from the model, not hand-listed, so a new Settings field can't
@@ -48,12 +48,37 @@ def make_client(monkeypatch):
         # _env_file=None disables loading the developer's real .env for this
         # instance; isolate_settings_env (above) is what actually clears any
         # real ambient env vars for the same field names — see ADR-017.
+        settings_overrides.setdefault("agent_ops_api_key", "test-operator-key")
         settings = Settings(_env_file=None, **settings_overrides)
         app.dependency_overrides[get_settings] = lambda: settings
-        return TestClient(app)
+        if settings.database_url:
+            app.dependency_overrides[get_optional_db_pool] = lambda: _HealthyPool()
+        return TestClient(app, headers={"X-Agent-Ops-Key": "test-operator-key"})
 
     yield _make_client
     app.dependency_overrides.clear()
+
+
+class _HealthyConnection:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+    def transaction(self):
+        return self
+
+    def execute(self, query, params=None):
+        return self
+
+    def fetchone(self):
+        return (1,)
+
+
+class _HealthyPool:
+    def connection(self, *, timeout):
+        return _HealthyConnection()
 
 
 @pytest.fixture
@@ -64,8 +89,8 @@ def client(make_client) -> TestClient:
 
 @pytest.fixture(scope="session")
 def db_pool():
-    """A real connection pool against the real DATABASE_URL (repo-root
-    `.env` locally, a CI secret in Actions) — skips DB-backed tests
+    """A real connection pool against DATABASE_URL (repo-root `.env` locally,
+    an isolated PostgreSQL service in CI) — skips DB-backed tests
     gracefully rather than failing if neither is set.
     """
     settings = Settings()  # deliberately NOT _env_file=None: reads the real .env

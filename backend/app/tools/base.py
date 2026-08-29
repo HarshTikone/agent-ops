@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Protocol
 
 from pydantic import BaseModel
 
@@ -10,6 +10,10 @@ from pydantic import BaseModel
 class Tool(Protocol):
     name: str
     description: str
-    args_schema: type[BaseModel]
 
-    def run(self, **kwargs: Any) -> str: ...
+    @property
+    def args_schema(self) -> type[BaseModel]: ...
+
+    def invoke(self, arguments: dict[str, object]) -> str:
+        """Validate and execute one planner-supplied argument mapping."""
+        ...

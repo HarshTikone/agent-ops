@@ -11,20 +11,25 @@ round trip.
 from __future__ import annotations
 
 import logging
+import traceback
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from psycopg_pool import ConnectionPool
 
 from app import repository as repo
-from app.api.schemas import RejectRequest, SessionResponse
+from app.api.schemas import RejectRequest, SessionResponse, validate_reject_request
 from app.api.sessions import session_with_pending_action
 from app.config import Settings, get_settings
-from app.db import get_checkpointer, get_db_pool
+from app.db import DbPool, get_checkpointer, get_db_pool
 from app.dependencies import get_llm_provider
 from app.llm.base import LLMProvider
+from app.rate_limit import limiter
+from app.resources import get_http_client
+from app.sanitization import sanitize_error
+from app.security import require_operator_key
 from app.session_runner import resume_session_run
 
 logger = logging.getLogger("agent_ops.api.approvals")
@@ -39,10 +44,11 @@ def _decide(
     *,
     approve: bool,
     reason: str | None,
-    pool: ConnectionPool,
+    pool: DbPool,
     checkpointer: BaseCheckpointSaver,
     llm: LLMProvider,
     settings: Settings,
+    http_client: httpx.Client,
 ) -> dict[str, Any]:
     existing = repo.get_pending_action(pool, pending_action_id)
     if existing is None:
@@ -61,26 +67,6 @@ def _decide(
         )
 
     try:
-        if approve:
-            # "executed" means "we approved this and are attempting to run
-            # it" (matching the docstring's original intent), NOT "the whole
-            # resume pipeline definitely completed without error" — that
-            # guarantee doesn't exist and isn't what this field is for.
-            # Marked BEFORE the (possibly-failing) resume call, not after, so
-            # a crash downstream of this point (C4, ADR-020) can never strand
-            # the action at 'approved' forever on a session stuck at
-            # 'awaiting_approval'. In the realistic failure shapes here, the
-            # tool itself already ran inside the graph (tool_call_node
-            # catches its own ToolErrors) — what typically crashes
-            # resume_session_run is something after that, e.g. persisting
-            # the result — so "attempted" is also usually true in the
-            # literal sense, not just the documented one. This write is
-            # inside the try for the same reason add_message is in
-            # sessions.py: it is one more write after the already-committed
-            # decide, so a failure here must land on 'failed' too, not
-            # escape uncaught.
-            repo.mark_pending_action_executed(pool, pending_action_id)
-
         resume_session_run(
             pool,
             checkpointer,
@@ -88,18 +74,21 @@ def _decide(
             session_id=decided["session_id"],
             approved=approve,
             tavily_api_key=settings.tavily_api_key,
+            pending_action_id=pending_action_id,
+            http_client=http_client,
         )
     except Exception as exc:
-        logger.exception(
-            "resume_run_failed session_id=%s pending_action_id=%s",
+        logger.error(
+            "resume_run_failed session_id=%s pending_action_id=%s traceback=%s",
             decided["session_id"],
             pending_action_id,
+            sanitize_error(traceback.format_exc(), max_length=8_000),
         )
         repo.add_trace_event(
             pool,
             decided["session_id"],
             node="system",
-            detail=f"CRASH: resume after {'approve' if approve else 'reject'} failed unexpectedly: {exc}",
+            detail=f"CRASH: resume after {'approve' if approve else 'reject'} failed unexpectedly",
         )
         repo.update_session_status(
             pool, decided["session_id"], status="failed", final_answer=_RUN_CRASH_MESSAGE
@@ -110,17 +99,27 @@ def _decide(
         ) from exc
 
     session = repo.get_session(pool, decided["session_id"])
+    if session is None:
+        raise HTTPException(status_code=404, detail="session was deleted while the run completed")
     return session_with_pending_action(pool, session)
 
 
-@router.post("/approvals/{pending_action_id}/approve", response_model=SessionResponse)
+@router.post(
+    "/approvals/{pending_action_id}/approve",
+    response_model=SessionResponse,
+    dependencies=[Depends(require_operator_key)],
+)
+@limiter.limit("10/minute")
 def approve(
+    request: Request,
     pending_action_id: UUID,
-    pool: ConnectionPool = Depends(get_db_pool),
+    pool: DbPool = Depends(get_db_pool),
     checkpointer: BaseCheckpointSaver = Depends(get_checkpointer),
     llm: LLMProvider = Depends(get_llm_provider),
     settings: Settings = Depends(get_settings),
+    http_client: httpx.Client = Depends(get_http_client),
 ) -> dict[str, Any]:
+    del request
     return _decide(
         pending_action_id,
         approve=True,
@@ -129,18 +128,27 @@ def approve(
         checkpointer=checkpointer,
         llm=llm,
         settings=settings,
+        http_client=http_client,
     )
 
 
-@router.post("/approvals/{pending_action_id}/reject", response_model=SessionResponse)
+@router.post(
+    "/approvals/{pending_action_id}/reject",
+    response_model=SessionResponse,
+    dependencies=[Depends(require_operator_key)],
+)
+@limiter.limit("10/minute")
 def reject(
+    request: Request,
     pending_action_id: UUID,
-    body: RejectRequest,
-    pool: ConnectionPool = Depends(get_db_pool),
+    body: RejectRequest = Depends(validate_reject_request),
+    pool: DbPool = Depends(get_db_pool),
     checkpointer: BaseCheckpointSaver = Depends(get_checkpointer),
     llm: LLMProvider = Depends(get_llm_provider),
     settings: Settings = Depends(get_settings),
+    http_client: httpx.Client = Depends(get_http_client),
 ) -> dict[str, Any]:
+    del request
     return _decide(
         pending_action_id,
         approve=False,
@@ -149,4 +157,5 @@ def reject(
         checkpointer=checkpointer,
         llm=llm,
         settings=settings,
+        http_client=http_client,
     )

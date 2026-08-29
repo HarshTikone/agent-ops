@@ -192,7 +192,7 @@ for context that later gets pruned from the active memory window.
   budget or an unknown Gemini free quota in one runaway session.
 - **Secrets** never enter the frontend bundle or a committed file — only
   `backend/` reads `GEMINI_API_KEY` / `OPENROUTER_API_KEY` /
-  `SUPABASE_SERVICE_KEY`; the frontend only ever talks to our own backend.
+  `SUPABASE_SECRET_KEY`; the frontend only ever talks to our own backend.
 
 ## 7. Day 2 amendments — what actually got built
 
@@ -311,3 +311,49 @@ the missing-checks list now uses the same status-keyed color as the header
 (previously hardcoded amber regardless of status) and the internal
 `Status` union's success variant is `'loaded'`, not `'ready'` — it no
 longer shadows `ReadinessResponse.status`'s own `'ready'` value.
+
+## 10. Reliability foundation amendments
+
+Application-table persistence for one graph result is now atomic. Trace rows,
+pending-action creation, assistant messages, and the final session transition
+share one explicit PostgreSQL transaction through connection-aware repository
+operations. LangGraph checkpoint persistence remains a separate package-owned
+commit and therefore cannot participate in that transaction; result
+application is idempotent where the two systems meet.
+
+Trace events now carry a per-session monotonic `sequence`, structured `level`,
+and optional `provider`. `(session_id, sequence)` is unique, so replaying a
+checkpoint result cannot duplicate trace rows, and the frontend uses `level`
+directly instead of inferring state from English text. Text inference remains
+only as compatibility behavior for pre-migration rows.
+
+Approval state distinguishes deciding from attempting. The HTTP approval
+endpoint commits `approved` or `rejected`; only the `tool_call` node marks an
+approved irreversible action `executed`, immediately before invoking the tool.
+A checkpoint-loading or graph-entry failure therefore cannot falsely claim the
+tool ran.
+
+Default CI is secret-free and isolated: a fresh pgvector/PostgreSQL service is
+migrated for every backend job, live-provider tests are excluded by a `live`
+marker, mypy checks the backend, and strict TypeScript checks the frontend. A
+separate manually dispatched workflow owns the real-provider smoke test.
+
+## 11. Security and operational-readiness amendments
+
+All state-changing routes require an `X-Agent-Ops-Key` value matched against
+`AGENT_OPS_API_KEY` with a constant-time comparison. The frontend accepts the
+single-operator credential at runtime and stores it only in `sessionStorage`;
+read-only observability routes never receive it. SlowAPI applies per-IP limits
+at the four mutation boundaries.
+
+FastAPI lifespan now owns the PostgreSQL pool and one shared `httpx.Client`.
+The pool checks connections before use, while `/health/ready` acquires a
+connection with a short timeout and executes a statement-timeout-bounded
+`SELECT 1`. `/health` remains dependency-free and is the sole container
+liveness target.
+
+Tool adapters translate broader transport/database errors. A final graph-node
+backstop converts any unexpected adapter exception to a permanent step failure,
+logs a redacted traceback, and persists only a stable sanitized summary. The
+runtime backend image is multi-stage, non-root, migration-capable, and excludes
+builder tooling.

@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ApprovalModal } from './ApprovalModal'
@@ -25,7 +25,7 @@ describe('ApprovalModal', () => {
         pendingAction={makePendingAction()}
         onApprove={vi.fn()}
         onReject={vi.fn()}
-        submitting={false}
+        submission={null}
         error={null}
       />,
     )
@@ -42,7 +42,7 @@ describe('ApprovalModal', () => {
         pendingAction={makePendingAction()}
         onApprove={onApprove}
         onReject={vi.fn()}
-        submitting={false}
+        submission={null}
         error={null}
       />,
     )
@@ -58,7 +58,7 @@ describe('ApprovalModal', () => {
         pendingAction={makePendingAction()}
         onApprove={vi.fn()}
         onReject={onReject}
-        submitting={false}
+        submission={null}
         error={null}
       />,
     )
@@ -75,7 +75,7 @@ describe('ApprovalModal', () => {
         pendingAction={makePendingAction()}
         onApprove={vi.fn()}
         onReject={onReject}
-        submitting={false}
+        submission={null}
         error={null}
       />,
     )
@@ -89,11 +89,11 @@ describe('ApprovalModal', () => {
         pendingAction={makePendingAction()}
         onApprove={vi.fn()}
         onReject={vi.fn()}
-        submitting={true}
+        submission="approve"
         error={null}
       />,
     )
-    expect(screen.getByRole('button', { name: 'Working…' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Approving…' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Reject' })).toBeDisabled()
     expect(screen.getByLabelText(/reason/i)).toBeDisabled()
   })
@@ -104,7 +104,7 @@ describe('ApprovalModal', () => {
         pendingAction={makePendingAction()}
         onApprove={vi.fn()}
         onReject={vi.fn()}
-        submitting={false}
+        submission={null}
         error="pending action already approved, not 'pending'"
       />,
     )
@@ -117,11 +117,64 @@ describe('ApprovalModal', () => {
         pendingAction={makePendingAction()}
         onApprove={vi.fn()}
         onReject={vi.fn()}
-        submitting={false}
+        submission={null}
         error={null}
       />,
     )
     const dialog = screen.getByRole('dialog')
     expect(dialog).toHaveAttribute('aria-modal', 'true')
+  })
+
+  it('shows a distinct submitting label for rejection', () => {
+    render(
+      <ApprovalModal
+        pendingAction={makePendingAction()}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        submission="reject"
+        error={null}
+      />,
+    )
+    expect(screen.getByRole('button', { name: 'Rejecting…' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeDisabled()
+  })
+
+  it('moves focus inside, traps it, makes the app inert, ignores Escape, and restores focus', async () => {
+    const user = userEvent.setup()
+    const appShell = document.createElement('div')
+    appShell.id = 'app-shell'
+    const opener = document.createElement('button')
+    opener.textContent = 'Open approval'
+    appShell.append(opener)
+    document.body.append(appShell)
+    opener.focus()
+
+    const rendered = render(
+      <ApprovalModal
+        pendingAction={makePendingAction()}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        submission={null}
+        error={null}
+      />,
+    )
+
+    expect(screen.getByRole('heading', { name: 'Approval needed' })).toHaveFocus()
+    expect(appShell.inert).toBe(true)
+
+    const approve = screen.getByRole('button', { name: 'Approve' })
+    approve.focus()
+    await user.tab()
+    expect(screen.getByLabelText(/reason/i)).toHaveFocus()
+    await user.tab({ shift: true })
+    expect(approve).toHaveFocus()
+
+    expect(fireEvent.keyDown(document, { key: 'Escape' })).toBe(false)
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+
+    rendered.unmount()
+    expect(appShell.inert).toBe(false)
+    expect(opener).toHaveFocus()
+    appShell.remove()
   })
 })

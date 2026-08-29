@@ -12,17 +12,33 @@ from typing import Literal
 from uuid import UUID
 
 import psycopg
-from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, Field
+from psycopg_pool import PoolTimeout
+from pydantic import BaseModel, Field, field_validator
 
 from app import repository as repo
+from app.db import DbPool
+from app.sanitization import sanitize_error
 from app.tools.errors import ToolError
 
 
 class NotesStoreArgs(BaseModel):
     action: Literal["write", "read", "list"]
-    key: str | None = Field(default=None, description="Note key — required for write/read")
-    content: str | None = Field(default=None, description="Note content — required for write")
+    key: str | None = Field(
+        default=None, min_length=1, max_length=200, description="Note key — required for write/read"
+    )
+    content: str | None = Field(
+        default=None, max_length=10_000, description="Note content — required for write"
+    )
+
+    @field_validator("key")
+    @classmethod
+    def trim_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("note key must not be blank")
+        return value
 
 
 class NotesStoreTool:
@@ -33,17 +49,31 @@ class NotesStoreTool:
     )
     args_schema = NotesStoreArgs
 
-    def __init__(self, pool: ConnectionPool, session_id: UUID) -> None:
+    def __init__(self, pool: DbPool, session_id: UUID) -> None:
         self._pool = pool
         self._session_id = session_id
+
+    def invoke(self, arguments: dict[str, object]) -> str:
+        args = self.args_schema.model_validate(arguments)
+        return self.run(action=args.action, key=args.key, content=args.content)
 
     def run(self, *, action: str, key: str | None = None, content: str | None = None) -> str:
         try:
             return self._run(action=action, key=key, content=content)
-        except psycopg.OperationalError as exc:
+        except (psycopg.OperationalError, psycopg.InterfaceError, PoolTimeout) as exc:
             # Connection lost / couldn't reach Postgres — transient, unlike
             # every other failure path here (ARCHITECTURE.md §6).
-            raise ToolError(f"notes store database error: {exc}", transient=True) from exc
+            raise ToolError(
+                f"notes store database unavailable: {sanitize_error(exc)}", transient=True
+            ) from exc
+        except (psycopg.DataError, psycopg.IntegrityError) as exc:
+            raise ToolError(
+                f"notes store rejected the request: {sanitize_error(exc)}", transient=False
+            ) from exc
+        except psycopg.DatabaseError as exc:
+            raise ToolError(
+                f"notes store database failure: {sanitize_error(exc)}", transient=False
+            ) from exc
 
     def _run(self, *, action: str, key: str | None, content: str | None) -> str:
         if action == "write":

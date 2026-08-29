@@ -8,7 +8,8 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel
+from fastapi import Query
+from pydantic import BaseModel, Field, field_validator
 
 
 class PendingActionResponse(BaseModel):
@@ -38,15 +39,45 @@ class SessionResponse(BaseModel):
 class TraceEventResponse(BaseModel):
     id: int
     session_id: UUID
+    sequence: int
     node: str
     detail: str
+    level: str
     provider: str | None
     created_at: datetime
 
 
 class CreateMessageRequest(BaseModel):
-    content: str
+    content: str = Field(min_length=1, max_length=8_000)
+
+    @field_validator("content")
+    @classmethod
+    def trim_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("message content must not be blank")
+        return value
 
 
 class RejectRequest(BaseModel):
-    reason: str | None = None
+    reason: str | None = Field(default=None, max_length=1_000)
+
+    @field_validator("reason")
+    @classmethod
+    def trim_reason(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+def validate_message_request(body: CreateMessageRequest) -> CreateMessageRequest:
+    """Dependency wrapper ensures body validation precedes infrastructure."""
+    return body
+
+
+def validate_reject_request(body: RejectRequest) -> RejectRequest:
+    return body
+
+
+def validate_session_limit(limit: int = Query(default=50, ge=1, le=100)) -> int:
+    return limit

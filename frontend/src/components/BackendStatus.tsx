@@ -10,6 +10,14 @@ type Status =
   | { state: 'error'; message: string }
   | { state: 'loaded'; data: ReadinessResponse }
 
+const readinessLabels: Record<keyof ReadinessResponse['checks'], string> = {
+  gemini_api_key_set: 'Gemini API key',
+  openrouter_api_key_set: 'OpenRouter API key',
+  supabase_configured: 'Supabase',
+  database_configured: 'Database configuration',
+  database_reachable: 'Database connection',
+}
+
 /**
  * Minimal, real connectivity check against the backend's /health/ready
  * endpoint. Deliberately covers all three states (loading/error/success),
@@ -65,7 +73,7 @@ export function BackendStatus() {
       {notConfigured.length > 0 && (
         <ul className={`mt-1 list-disc pl-5 ${statusColor[status.data.status]}`}>
           {notConfigured.map(([key]) => (
-            <li key={key}>{key} missing</li>
+            <li key={key}>{readinessLabels[key as keyof ReadinessResponse['checks']]} missing</li>
           ))}
         </ul>
       )}

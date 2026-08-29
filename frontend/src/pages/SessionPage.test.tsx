@@ -71,8 +71,10 @@ describe('SessionPage', () => {
       {
         id: 1,
         session_id: 's1',
+        sequence: 1,
         node: 'planner',
         detail: 'planned',
+        level: 'success',
         provider: 'gemini',
         created_at: '2026-08-24T00:00:00Z',
       },
@@ -100,7 +102,7 @@ describe('SessionPage', () => {
     )
     await user.click(screen.getByRole('button', { name: 'Send' }))
 
-    expect(api.sendMessage).toHaveBeenCalledWith('s1', 'what is 2+2?')
+    expect(api.sendMessage).toHaveBeenCalledWith('s1', 'what is 2+2?', expect.any(AbortSignal))
     expect(await screen.findByText('it is 4')).toBeInTheDocument()
   })
 
@@ -132,7 +134,7 @@ describe('SessionPage', () => {
     )
     await user.click(screen.getByRole('button', { name: 'Approve' }))
 
-    expect(api.approvePendingAction).toHaveBeenCalledWith('p1')
+    expect(api.approvePendingAction).toHaveBeenCalledWith('p1', expect.any(AbortSignal))
     expect(await screen.findByText('saved')).toBeInTheDocument()
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
@@ -166,7 +168,11 @@ describe('SessionPage', () => {
     )
     await user.click(screen.getByRole('button', { name: 'Reject' }))
 
-    expect(api.rejectPendingAction).toHaveBeenCalledWith('p1', 'not needed')
+    expect(api.rejectPendingAction).toHaveBeenCalledWith(
+      'p1',
+      'not needed',
+      expect.any(AbortSignal),
+    )
     expect(await screen.findByText('not saved')).toBeInTheDocument()
   })
 
@@ -196,5 +202,24 @@ describe('SessionPage', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('already approved')
     expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('aborts an in-flight action when the page unmounts', async () => {
+    const user = userEvent.setup()
+    let actionSignal: AbortSignal | undefined
+    vi.mocked(api.getSession).mockResolvedValueOnce(makeSession({ status: 'created' }))
+    vi.mocked(api.getTrace).mockResolvedValue([])
+    vi.mocked(api.sendMessage).mockImplementation((_id, _content, signal) => {
+      actionSignal = signal
+      return new Promise(() => {})
+    })
+    const rendered = renderPage()
+
+    await user.type(await screen.findByLabelText(/what should the agent do/i), 'keep working')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    expect(actionSignal?.aborted).toBe(false)
+
+    rendered.unmount()
+    expect(actionSignal?.aborted).toBe(true)
   })
 })

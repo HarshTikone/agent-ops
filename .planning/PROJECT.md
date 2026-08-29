@@ -48,25 +48,25 @@ nothing else about the build matters.
      reviews/day-4-fix-prompt.md's remaining 6 phases, which decompose most
      of that remaining work with more precision than re-deriving it. -->
 
-- [ ] Session/trace persistence is transactional and durable — no partial
+- [x] Session/trace persistence is transactional and durable — no partial
       writes leave a session unrecoverable, trace sequencing never silently
       drops or duplicates events, `trace_events.provider` is actually written
       (fix-prompt Phase 2: H2, H3, H4, M1, M3, L12-14)
-- [ ] Type safety enforced in CI — mypy on the backend, TypeScript `strict`
+- [x] Type safety enforced in CI — mypy on the backend, TypeScript `strict`
       on the frontend, and the `Tool` Protocol actually matches what the
       implementations do (fix-prompt Phase 3: H5, H6, M5, L19)
-- [ ] Every tool failure is caught and logged at the adapter boundary with no
+- [x] Every tool failure is caught and logged at the adapter boundary with no
       leaked resources (`httpx.Client`, narrow exception catches) (fix-prompt
       Phase 4: M2, M6, M7)
-- [ ] The approval gate and mutating endpoints are authenticated and
+- [x] The approval gate and mutating endpoints are authenticated and
       rate-limited, `/health/ready` dials its real dependencies instead of
       checking config strings, and CI runs cleanly on a fork with zero
       secrets (fix-prompt Phase 5 — this is Day 5/6's security & hardening
       scope: H1, H7, H8, M9, M10, L16)
-- [ ] The approval modal is a real accessible dialog (focus trap, Escape,
+- [x] The approval modal is a real accessible dialog (focus trap, Escape,
       `inert` background) and the remaining frontend polish items are closed
       (fix-prompt Phase 6: M11, M12, L2-8)
-- [ ] Documentation reflects actual current state — README leads with the
+- [x] Documentation reflects actual current state — README leads with the
       problem/solution instead of the stale "Day 1" status line, new
       append-only ADRs record every fix above, `ARCHITECTURE.md` gets a "Day
       4.5 amendments" section (fix-prompt Phase 7 + Day 5's README rewrite)
@@ -132,4 +132,4 @@ nothing else about the build matters.
 | Restructured the remaining Day 5-7 roadmap around the existing `reviews/day-4-fix-prompt.md`'s 6 remaining phases, rather than re-deriving scope from `MASTER_PROMPT.md` alone | The fix-prompt already decomposes almost all remaining hardening/security/docs work with more precision, and Phase 5 already *is* most of Day 5's stated scope (rate limiting, H1 auth) | — Pending, to be validated once the roadmap is built |
 
 ---
-*Last updated: 2026-08-25 after Phase 1 review-remediation commit (`f47d007`), before roadmap creation*
+*Last updated: 2026-08-28 after Sprint 03 local release-candidate validation; public deployment remains pending.*

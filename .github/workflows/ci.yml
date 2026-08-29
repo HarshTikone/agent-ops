@@ -10,6 +10,22 @@ jobs:
   backend:
     name: Backend (lint + test)
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: agent_ops
+          POSTGRES_PASSWORD: agent_ops
+          POSTGRES_DB: agent_ops_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agent_ops -d agent_ops_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://agent_ops:agent_ops@localhost:5432/agent_ops_test
     defaults:
       run:
         working-directory: backend
@@ -31,18 +47,13 @@ jobs:
       - name: Format check (black)
         run: black --check .
 
-      - name: Test (pytest)
-        env:
-          # Real credentials, not mocks — the DB-backed and integration
-          # tests (ADR-014) hit the real Supabase project and real Gemini;
-          # only OpenRouter is rate-limited (ADR-003), and the test suite
-          # never calls it, mocking the failover boundary instead.
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      - name: Type check (mypy)
+        run: mypy app
+
+      - name: Apply migrations
+        run: python -m scripts.migrate
+
+      - name: Test (secret-free pytest)
         run: pytest -v
 
   frontend:
@@ -74,3 +85,54 @@ jobs:
 
       - name: Build
         run: npm run build
+        env:
+          VITE_API_URL: https://api.example.invalid
+
+  container:
+    name: Backend container smoke
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: agent_ops
+          POSTGRES_PASSWORD: agent_ops
+          POSTGRES_DB: agent_ops_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agent_ops -d agent_ops_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build runtime image
+        run: docker build --tag agent-ops-backend ./backend
+
+      - name: Verify non-root runtime and packaged migrations
+        run: |
+          test "$(docker image inspect agent-ops-backend --format '{{.Config.User}}')" = "agentops"
+          docker run --rm agent-ops-backend test -f migrations/0001_initial_schema.sql
+          docker run --rm agent-ops-backend test -f scripts/migrate.py
+
+      - name: Apply migrations inside image
+        run: >-
+          docker run --rm --network host
+          -e DATABASE_URL=postgresql://agent_ops:agent_ops@127.0.0.1:5432/agent_ops_test
+          agent-ops-backend python -m scripts.migrate
+
+      - name: Start image and probe liveness
+        run: |
+          docker run --detach --name agent-ops-smoke --network host agent-ops-backend
+          for attempt in {1..20}; do
+            if curl --fail --silent http://127.0.0.1:8000/health; then exit 0; fi
+            sleep 1
+          done
+          docker logs agent-ops-smoke
+          exit 1
+
+      - name: Stop smoke container
+        if: always()
+        run: docker rm --force agent-ops-smoke || true

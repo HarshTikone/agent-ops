@@ -74,6 +74,21 @@ def test_list_sessions_returns_most_recent_first(db_pool) -> None:
             conn.execute("DELETE FROM sessions WHERE id IN (%s, %s)", (older["id"], newer["id"]))
 
 
+def test_list_sessions_embeds_pending_action_in_same_query(db_pool, session_row) -> None:
+    action = repo.create_pending_action(
+        db_pool,
+        session_row["id"],
+        tool_name="notes_store",
+        tool_args={"action": "write", "key": "release", "content": "ready"},
+    )
+
+    listed = next(row for row in repo.list_sessions(db_pool) if row["id"] == session_row["id"])
+
+    assert listed["pending_action"]["id"] == str(action["id"])
+    assert listed["pending_action"]["session_id"] == str(session_row["id"])
+    assert listed["pending_action"]["tool_args"]["key"] == "release"
+
+
 def test_get_pending_action_for_session_finds_the_live_one(db_pool, session_row) -> None:
     assert repo.get_pending_action_for_session(db_pool, session_row["id"]) is None
 
@@ -97,6 +112,14 @@ def test_update_session_status_sets_final_answer(db_pool, session_row) -> None:
     assert fetched["final_answer"] == "the answer is 4"
 
 
+def test_status_only_update_preserves_existing_final_answer(db_pool, session_row) -> None:
+    repo.update_session_status(
+        db_pool, session_row["id"], status="done", final_answer="keep this answer"
+    )
+    repo.update_session_status(db_pool, session_row["id"], status="failed")
+    assert repo.get_session(db_pool, session_row["id"])["final_answer"] == "keep this answer"
+
+
 def test_messages_round_trip_in_order(db_pool, session_row) -> None:
     repo.add_message(db_pool, session_row["id"], role="user", content="first")
     repo.add_message(db_pool, session_row["id"], role="assistant", content="second")
@@ -112,8 +135,34 @@ def test_trace_events_round_trip_in_order(db_pool, session_row) -> None:
 
     events = repo.list_trace_events(db_pool, session_row["id"])
     assert [e["node"] for e in events] == ["planner", "delegate"]
+    assert [e["sequence"] for e in events] == [1, 2]
+    assert [e["level"] for e in events] == ["info", "info"]
     assert events[0]["provider"] == "gemini"
     assert events[1]["provider"] is None
+
+
+def test_trace_sequence_makes_replayed_event_idempotent(db_pool, session_row) -> None:
+    first = repo.add_trace_event(
+        db_pool,
+        session_row["id"],
+        sequence=1,
+        node="planner",
+        detail="planned",
+        level="success",
+        provider="gemini",
+    )
+    replay = repo.add_trace_event(
+        db_pool,
+        session_row["id"],
+        sequence=1,
+        node="planner",
+        detail="planned",
+        level="success",
+        provider="gemini",
+    )
+    assert first is not None
+    assert replay is None
+    assert len(repo.list_trace_events(db_pool, session_row["id"])) == 1
 
 
 def test_pending_action_jsonb_args_round_trip(db_pool, session_row) -> None:

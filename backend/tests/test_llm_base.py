@@ -11,11 +11,22 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage
 
 from app.llm.base import (
+    LLMProvider,
     LLMResponse,
     ToolCallRequest,
     ai_message_from_llm_response,
     llm_response_from_ai_message,
 )
+
+
+def test_provider_protocol_is_runtime_checkable() -> None:
+    class Provider:
+        name = "test"
+
+        def generate(self, messages, tools=None):
+            return LLMResponse(content="ok", tool_calls=[], provider=self.name)
+
+    assert isinstance(Provider(), LLMProvider)
 
 
 def test_extracts_plain_text_from_a_plain_string_content() -> None:

@@ -5,8 +5,12 @@ the jsonb-adapter bug that live verification found while wiring this up.
 
 from __future__ import annotations
 
+from uuid import uuid4
+
+import psycopg
 import pytest
 
+from app import repository as repo
 from app.tools.errors import ToolError
 from app.tools.notes_store import NotesStoreTool
 
@@ -43,9 +47,40 @@ def test_write_without_content_raises_permanent_tool_error(notes: NotesStoreTool
     assert exc_info.value.transient is False
 
 
+def test_note_schema_rejects_whitespace_only_key() -> None:
+    notes = NotesStoreTool(object(), uuid4())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="note key must not be blank"):
+        notes.invoke({"action": "read", "key": "   "})
+
+
 def test_unknown_action_raises_permanent_tool_error(notes: NotesStoreTool) -> None:
     with pytest.raises(ToolError) as exc_info:
         notes.run(action="delete", key="k")
+    assert exc_info.value.transient is False
+
+
+def test_operational_error_is_transient_and_redacts_connection_credentials(monkeypatch) -> None:
+    tool = NotesStoreTool(object(), uuid4())  # type: ignore[arg-type]
+
+    def fail(*args, **kwargs):
+        raise psycopg.OperationalError("postgresql://operator:secret@db.example/test")
+
+    monkeypatch.setattr(repo, "read_note", fail)
+    with pytest.raises(ToolError) as exc_info:
+        tool.run(action="read", key="topic")
+    assert exc_info.value.transient is True
+    assert "secret" not in str(exc_info.value)
+
+
+def test_integrity_error_is_permanent(monkeypatch) -> None:
+    tool = NotesStoreTool(object(), uuid4())  # type: ignore[arg-type]
+
+    def fail(*args, **kwargs):
+        raise psycopg.IntegrityError("constraint")
+
+    monkeypatch.setattr(repo, "write_note", fail)
+    with pytest.raises(ToolError) as exc_info:
+        tool.run(action="write", key="topic", content="value")
     assert exc_info.value.transient is False
 
 

@@ -12,7 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # pydantic-settings resolves a relative env_file against the process's CWD,
@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     # --- Tools (Day 2) -----------------------------------------------------
     tavily_api_key: str = Field(default="", description="Web search tool provider key")
 
+    # --- API access control -----------------------------------------------
+    # SecretStr prevents accidental disclosure through Settings repr/logging.
+    agent_ops_api_key: SecretStr = Field(
+        default=SecretStr(""), description="Operator key required for state-changing requests"
+    )
+
     # --- Database / memory / trace log (Supabase) -------------------------
     supabase_url: str = Field(default="")
     supabase_secret_key: str = Field(default="")
@@ -57,9 +63,9 @@ class Settings(BaseSettings):
 
     # --- App config --------------------------------------------------------
     environment: Literal["development", "production"] = Field(default="development")
-    port: int = Field(default=8000)
     cors_origins: str = Field(default="http://localhost:5173")
     log_level: Literal["debug", "info", "warning", "error"] = Field(default="info")
+    readiness_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -99,6 +105,12 @@ class Settings(BaseSettings):
                 "fails at first use instead of at startup (see ADR-020). Currently "
                 f"openrouter_api_key_set={has_key} openrouter_model_set={has_model}."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _require_operator_key_in_production(self) -> "Settings":
+        if self.is_production and not self.agent_ops_api_key.get_secret_value():
+            raise ValueError("AGENT_OPS_API_KEY must be set in production")
         return self
 
 

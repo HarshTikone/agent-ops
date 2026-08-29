@@ -27,8 +27,8 @@ class _SpyTool:
         self.args_schema = None
         self.calls: list[dict] = []
 
-    def run(self, **kwargs) -> str:
-        self.calls.append(kwargs)
+    def invoke(self, arguments: dict[str, object]) -> str:
+        self.calls.append(arguments)
         return f"{self.name} result"
 
 

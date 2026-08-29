@@ -55,7 +55,7 @@ describe('BackendStatus', () => {
     render(<BackendStatus />)
     const statusText = await screen.findByText(/Backend status: degraded/)
     expect(statusText).toHaveClass('text-amber-500')
-    const missingList = screen.getByText('openrouter_api_key_set missing')
+    const missingList = screen.getByText('OpenRouter API key missing')
     expect(missingList).toBeInTheDocument()
     expect(missingList.closest('ul')).toHaveClass('text-amber-500')
   })
@@ -76,13 +76,13 @@ describe('BackendStatus', () => {
     render(<BackendStatus />)
     const statusText = await screen.findByText(/Backend status: not_ready/)
     expect(statusText).toHaveClass('text-red-500')
-    const missingItem = screen.getByText('openrouter_api_key_set missing')
+    const missingItem = screen.getByText('OpenRouter API key missing')
     expect(missingItem).toBeInTheDocument()
     // The fix: the missing-checks list now matches the header's color
     // instead of always being amber regardless of status (flagged Day 1).
     expect(missingItem.closest('ul')).toHaveClass('text-red-500')
-    expect(screen.getByText('supabase_configured missing')).toBeInTheDocument()
-    expect(screen.queryByText(/gemini_api_key_set missing/)).not.toBeInTheDocument()
+    expect(screen.getByText('Supabase missing')).toBeInTheDocument()
+    expect(screen.queryByText(/Gemini API key missing/)).not.toBeInTheDocument()
   })
 
   it('shows an error state — the shown failure mode — when the backend is unreachable', async () => {

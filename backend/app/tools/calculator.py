@@ -80,7 +80,9 @@ def _check_pow_bounds(base: float, exponent: float) -> None:
         return
     if abs(base) <= 1:
         return  # magnitude never grows past 1, whatever the exponent
-    estimated_bits = abs(exponent) * math.log2(abs(base))
+    if exponent <= 0:
+        return
+    estimated_bits = exponent * math.log2(abs(base))
     if estimated_bits > _MAX_POW_RESULT_BITS:
         raise ToolError(
             f"result of {base!r} ** {exponent!r} would be too large "
@@ -124,6 +126,10 @@ class CalculatorTool:
         "instead of computing it yourself."
     )
     args_schema = CalculatorArgs
+
+    def invoke(self, arguments: dict[str, object]) -> str:
+        args = self.args_schema.model_validate(arguments)
+        return self.run(expression=args.expression)
 
     def run(self, *, expression: str) -> str:
         if len(expression) > _MAX_EXPRESSION_LENGTH:

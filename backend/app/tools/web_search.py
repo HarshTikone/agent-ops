@@ -9,7 +9,7 @@ Auth is a bearer header (`Authorization: Bearer tvly-...`), not a body field
 from __future__ import annotations
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.tools.errors import ToolError
 
@@ -18,7 +18,15 @@ _REQUEST_TIMEOUT_SECONDS = 15
 
 
 class WebSearchArgs(BaseModel):
-    query: str = Field(description="Search query")
+    query: str = Field(min_length=1, max_length=500, description="Search query")
+
+    @field_validator("query")
+    @classmethod
+    def trim_query(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("search query must not be blank")
+        return value
 
 
 class WebSearchTool:
@@ -33,6 +41,10 @@ class WebSearchTool:
         self._api_key = api_key
         self._client = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
 
+    def invoke(self, arguments: dict[str, object]) -> str:
+        args = self.args_schema.model_validate(arguments)
+        return self.run(query=args.query)
+
     def run(self, *, query: str) -> str:
         if not self._api_key:
             raise ToolError("TAVILY_API_KEY not configured", transient=False)
@@ -45,17 +57,15 @@ class WebSearchTool:
             )
         except httpx.TimeoutException as exc:
             raise ToolError(f"web search timed out: {exc}", transient=True) from exc
-        except httpx.ConnectError as exc:
-            raise ToolError(f"web search connection failed: {exc}", transient=True) from exc
+        except httpx.TransportError as exc:
+            raise ToolError("web search transport failed", transient=True) from exc
 
         if response.status_code == 429:
             raise ToolError("web search rate-limited", transient=True)
         if response.status_code >= 500:
             raise ToolError(f"web search server error {response.status_code}", transient=True)
         if response.status_code >= 400:
-            raise ToolError(
-                f"web search request error {response.status_code}: {response.text}", transient=False
-            )
+            raise ToolError(f"web search request error {response.status_code}", transient=False)
 
         try:
             data = response.json()

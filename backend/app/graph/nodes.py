@@ -12,6 +12,7 @@ across the other nodes.
 from __future__ import annotations
 
 import logging
+import traceback
 from collections.abc import Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -19,8 +20,9 @@ from langgraph.graph import END
 from langgraph.types import interrupt
 
 from app.graph.limits import MAX_REPLANS, MAX_STEP_RETRIES, MAX_TOOL_CALLS
-from app.graph.state import GraphState
-from app.llm.base import LLMProvider, ai_message_from_llm_response
+from app.graph.state import GraphState, new_trace_event
+from app.llm.base import LLMProvider, ToolCallRequest, ai_message_from_llm_response
+from app.sanitization import sanitize_error
 from app.tools.base import Tool
 from app.tools.errors import ToolError
 
@@ -43,10 +45,13 @@ def make_planner_node(llm: LLMProvider, langchain_tools: list) -> Callable[[Grap
         ]
         response = llm.generate(messages, tools=langchain_tools)
         new_messages = [*messages, ai_message_from_llm_response(response)]
-        trace_entry = {
-            "node": "planner",
-            "detail": f"provider={response.provider} steps={[tc.name for tc in response.tool_calls]}",
-        }
+        trace_entry = new_trace_event(
+            state,
+            node="planner",
+            detail=f"provider={response.provider} steps={[tc.name for tc in response.tool_calls]}",
+            level="success",
+            provider=response.provider,
+        )
 
         if not response.tool_calls:
             return {
@@ -76,10 +81,11 @@ def route_after_planner(state: GraphState) -> str:
 
 def delegate_node(state: GraphState) -> dict:
     step = state["plan"][state["step_index"]]
-    trace_entry = {
-        "node": "delegate",
-        "detail": f"step={state['step_index']} tool={step.name} args={step.arguments}",
-    }
+    trace_entry = new_trace_event(
+        state,
+        node="delegate",
+        detail=f"step={state['step_index']} tool={step.name} args={step.arguments}",
+    )
     return {"trace": [*state["trace"], trace_entry]}
 
 
@@ -92,7 +98,7 @@ def delegate_node(state: GraphState) -> dict:
 IRREVERSIBLE_STEPS = {("notes_store", "write")}
 
 
-def _needs_approval(step) -> bool:
+def _needs_approval(step: ToolCallRequest) -> bool:
     return (step.name, step.arguments.get("action")) in IRREVERSIBLE_STEPS
 
 
@@ -115,10 +121,12 @@ def approval_gate_node(state: GraphState) -> dict:
         return {
             "trace": [
                 *state["trace"],
-                {
-                    "node": "approval_gate",
-                    "detail": f"step={state['step_index']} tool={step.name} APPROVED",
-                },
+                new_trace_event(
+                    state,
+                    node="approval_gate",
+                    detail=f"step={state['step_index']} tool={step.name} APPROVED",
+                    level="success",
+                ),
             ]
         }
     return {
@@ -127,15 +135,19 @@ def approval_gate_node(state: GraphState) -> dict:
         "last_failure_transient": False,
         "trace": [
             *state["trace"],
-            {
-                "node": "approval_gate",
-                "detail": f"step={state['step_index']} tool={step.name} REJECTED",
-            },
+            new_trace_event(
+                state,
+                node="approval_gate",
+                detail=f"step={state['step_index']} tool={step.name} REJECTED",
+                level="error",
+            ),
         ],
     }
 
 
-def make_tool_call_node(tools: dict[str, Tool]) -> Callable[[GraphState], dict]:
+def make_tool_call_node(
+    tools: dict[str, Tool], on_irreversible_tool_attempt: Callable[[], None] | None = None
+) -> Callable[[GraphState], dict]:
     def tool_call_node(state: GraphState) -> dict:
         if state["last_failure"] is not None:
             # approval_gate already recorded a rejection for this step —
@@ -168,34 +180,78 @@ def make_tool_call_node(tools: dict[str, Tool]) -> Callable[[GraphState], dict]:
                 "tool_calls_made": tool_calls_made,
                 "trace": [
                     *state["trace"],
-                    {"node": "tool_call", "detail": f"FAILED (permanent): {error_text}"},
+                    new_trace_event(
+                        state,
+                        node="tool_call",
+                        detail=f"FAILED (permanent): {error_text}",
+                        level="error",
+                    ),
                 ],
             }
 
+        # This is the first boundary at which an approved irreversible action
+        # is genuinely about to be attempted. Recording it in the approval
+        # endpoint was too early: checkpoint loading can fail before this node.
+        if _needs_approval(step) and on_irreversible_tool_attempt is not None:
+            on_irreversible_tool_attempt()
+
         try:
-            result = tool.run(**step.arguments)
+            result = tool.invoke(step.arguments)
         except ToolError as exc:
             # Hard requirement (ARCHITECTURE.md §6): every tool failure is
             # caught and logged right here, never left to cross this node's
             # boundary as a raw, unclassified exception.
+            safe_error = sanitize_error(exc)
             logger.error(
                 "tool_call_failed step=%s tool=%s transient=%s error=%s",
                 state["step_index"],
                 step.name,
                 exc.transient,
-                exc,
+                safe_error,
             )
             return {
                 "last_result": None,
-                "last_failure": str(exc),
+                "last_failure": safe_error,
                 "last_failure_transient": exc.transient,
                 "tool_calls_made": tool_calls_made,
                 "trace": [
                     *state["trace"],
-                    {
-                        "node": "tool_call",
-                        "detail": f"FAILED ({'transient' if exc.transient else 'permanent'}): {exc}",
-                    },
+                    new_trace_event(
+                        state,
+                        node="tool_call",
+                        detail=(
+                            f"FAILED ({'transient' if exc.transient else 'permanent'}): "
+                            f"{safe_error}"
+                        ),
+                        level="warning" if exc.transient else "error",
+                    ),
+                ],
+            }
+        except Exception:
+            # Adapter bugs are permanent step failures, not graph crashes.
+            # Log a redacted traceback for operators while traces/users get
+            # only a stable summary with no exception payload.
+            safe_traceback = sanitize_error(traceback.format_exc(), max_length=8_000)
+            logger.error(
+                "unexpected_tool_failure step=%s tool=%s traceback=%s",
+                state["step_index"],
+                step.name,
+                safe_traceback,
+            )
+            error_text = f"unexpected {step.name} failure"
+            return {
+                "last_result": None,
+                "last_failure": error_text,
+                "last_failure_transient": False,
+                "tool_calls_made": tool_calls_made,
+                "trace": [
+                    *state["trace"],
+                    new_trace_event(
+                        state,
+                        node="tool_call",
+                        detail=f"FAILED (permanent): {error_text}",
+                        level="error",
+                    ),
                 ],
             }
 
@@ -204,7 +260,12 @@ def make_tool_call_node(tools: dict[str, Tool]) -> Callable[[GraphState], dict]:
             "last_failure": None,
             "last_failure_transient": None,
             "tool_calls_made": tool_calls_made,
-            "trace": [*state["trace"], {"node": "tool_call", "detail": f"OK: {result[:200]}"}],
+            "trace": [
+                *state["trace"],
+                new_trace_event(
+                    state, node="tool_call", detail=f"OK: {result[:200]}", level="success"
+                ),
+            ],
         }
 
     return tool_call_node
@@ -232,7 +293,7 @@ def observe_node(state: GraphState) -> dict:
         "messages": [*prior_messages, tool_message],
         "trace": [
             *state["trace"],
-            {"node": "observe", "detail": f"step={state['step_index']} ok={ok}"},
+            new_trace_event(state, node="observe", detail=f"step={state['step_index']} ok={ok}"),
         ],
     }
 
@@ -244,7 +305,10 @@ def _give_up_on_cap(state: GraphState) -> dict:
         "next_action": "give_up",
         "status": "failed",
         "final_answer": f"Stopped after {MAX_TOOL_CALLS} tool calls without finishing the task.",
-        "trace": [*state["trace"], {"node": "decide_next", "detail": detail}],
+        "trace": [
+            *state["trace"],
+            new_trace_event(state, node="decide_next", detail=detail, level="error"),
+        ],
     }
 
 
@@ -265,7 +329,12 @@ def decide_next_node(state: GraphState) -> dict:
                 "step_index": next_index,
                 "trace": [
                     *state["trace"],
-                    {"node": "decide_next", "detail": "plan complete -> finalize"},
+                    new_trace_event(
+                        state,
+                        node="decide_next",
+                        detail="plan complete -> finalize",
+                        level="success",
+                    ),
                 ],
             }
         if state["tool_calls_made"] >= MAX_TOOL_CALLS:
@@ -276,10 +345,12 @@ def decide_next_node(state: GraphState) -> dict:
             "step_attempts": 0,
             "trace": [
                 *state["trace"],
-                {
-                    "node": "decide_next",
-                    "detail": f"step {state['step_index']} ok -> advance to step {next_index}",
-                },
+                new_trace_event(
+                    state,
+                    node="decide_next",
+                    detail=f"step {state['step_index']} ok -> advance to step {next_index}",
+                    level="success",
+                ),
             ],
         }
 
@@ -302,10 +373,12 @@ def decide_next_node(state: GraphState) -> dict:
             "last_failure_transient": None,
             "trace": [
                 *state["trace"],
-                {
-                    "node": "decide_next",
-                    "detail": f"step {state['step_index']} transient failure -> retry (attempt {attempt}/{MAX_STEP_RETRIES})",
-                },
+                new_trace_event(
+                    state,
+                    node="decide_next",
+                    detail=f"step {state['step_index']} transient failure -> retry (attempt {attempt}/{MAX_STEP_RETRIES})",
+                    level="warning",
+                ),
             ],
         }
 
@@ -328,10 +401,12 @@ def decide_next_node(state: GraphState) -> dict:
             "messages": [*state["messages"], failure_context],
             "trace": [
                 *state["trace"],
-                {
-                    "node": "decide_next",
-                    "detail": f"step {state['step_index']} not retryable -> replan ({replan_count}/{MAX_REPLANS})",
-                },
+                new_trace_event(
+                    state,
+                    node="decide_next",
+                    detail=f"step {state['step_index']} not retryable -> replan ({replan_count}/{MAX_REPLANS})",
+                    level="warning",
+                ),
             ],
         }
 
@@ -341,7 +416,12 @@ def decide_next_node(state: GraphState) -> dict:
         "final_answer": f"Could not complete the task: {state['last_failure']}",
         "trace": [
             *state["trace"],
-            {"node": "decide_next", "detail": "give_up: re-plan budget exhausted"},
+            new_trace_event(
+                state,
+                node="decide_next",
+                detail="give_up: re-plan budget exhausted",
+                level="error",
+            ),
         ],
     }
 
@@ -367,7 +447,13 @@ def make_finalize_node(llm: LLMProvider) -> Callable[[GraphState], dict]:
             "final_answer": response.content,
             "trace": [
                 *state["trace"],
-                {"node": "finalize", "detail": f"provider={response.provider}"},
+                new_trace_event(
+                    state,
+                    node="finalize",
+                    detail=f"provider={response.provider}",
+                    level="success",
+                    provider=response.provider,
+                ),
             ],
         }
 

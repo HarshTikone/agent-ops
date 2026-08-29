@@ -3,13 +3,33 @@
  * directly — only to our own backend, which holds every secret.
  */
 
-export const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
+const configuredApiUrl = import.meta.env.VITE_API_URL?.trim()
+if (import.meta.env.PROD && !configuredApiUrl) {
+  throw new Error('VITE_API_URL is required for production builds')
+}
+export const API_BASE_URL = configuredApiUrl?.replace(/\/$/, '') ?? 'http://localhost:8000'
+const OPERATOR_KEY_STORAGE = 'agent-ops.operator-key'
+
+export function getOperatorKey(): string {
+  return sessionStorage.getItem(OPERATOR_KEY_STORAGE)?.trim() ?? ''
+}
+
+export function setOperatorKey(key: string): void {
+  const normalized = key.trim()
+  if (normalized) sessionStorage.setItem(OPERATOR_KEY_STORAGE, normalized)
+  else sessionStorage.removeItem(OPERATOR_KEY_STORAGE)
+}
+
+export function clearOperatorKey(): void {
+  sessionStorage.removeItem(OPERATOR_KEY_STORAGE)
+}
 
 export interface ReadinessChecks {
   gemini_api_key_set: boolean
   openrouter_api_key_set: boolean
   supabase_configured: boolean
   database_configured: boolean
+  database_reachable: boolean
 }
 
 /**
@@ -85,8 +105,10 @@ export interface Session {
 export interface TraceEvent {
   id: number
   session_id: string
+  sequence: number
   node: string
   detail: string
+  level: 'info' | 'success' | 'warning' | 'error'
   provider: string | null
   created_at: string
 }
@@ -98,9 +120,19 @@ export interface TraceEvent {
  * since every mutating endpoint below can return a meaningful 404/409.
  */
 async function request<T>(path: string, init?: RequestInit & { signal?: AbortSignal }): Promise<T> {
+  const method = (init?.method ?? 'GET').toUpperCase()
+  const headers = new Headers(init?.headers)
+  if (init?.body) headers.set('Content-Type', 'application/json')
+  if (method !== 'GET' && method !== 'HEAD') {
+    const operatorKey = getOperatorKey()
+    if (!operatorKey) {
+      throw new ApiError('Enter the operator key before making changes.', 401)
+    }
+    headers.set('X-Agent-Ops-Key', operatorKey)
+  }
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
+    headers,
   })
   if (!response.ok) {
     let detail = `request to ${path} failed with status ${response.status}`

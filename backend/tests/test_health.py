@@ -24,6 +24,7 @@ def test_readiness_not_ready_when_nothing_configured(client):
         "openrouter_api_key_set": False,
         "supabase_configured": False,
         "database_configured": False,
+        "database_reachable": False,
     }
 
 

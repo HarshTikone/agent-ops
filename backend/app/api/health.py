@@ -24,9 +24,12 @@ Gemini-only setup with no OpenRouter key can serve everything, just with no
 safety net if Gemini has an outage mid-demo.
 """
 
+import psycopg
 from fastapi import APIRouter, Depends
+from psycopg_pool import PoolTimeout
 
 from app.config import Settings, get_settings
+from app.db import DbPool, get_optional_db_pool
 
 router = APIRouter(tags=["health"])
 
@@ -36,19 +39,40 @@ def liveness() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _database_reachable(pool: DbPool | None, timeout_seconds: float) -> bool:
+    if pool is None:
+        return False
+    try:
+        with pool.connection(timeout=timeout_seconds) as connection, connection.transaction():
+            connection.execute(
+                "SELECT set_config('statement_timeout', %s, true)",
+                (str(round(timeout_seconds * 1_000)),),
+            )
+            connection.execute("SELECT 1").fetchone()
+        return True
+    except (PoolTimeout, psycopg.Error):
+        return False
+
+
 @router.get("/health/ready")
-def readiness(settings: Settings = Depends(get_settings)) -> dict[str, object]:
+def readiness(
+    settings: Settings = Depends(get_settings),
+    pool: DbPool | None = Depends(get_optional_db_pool),
+) -> dict[str, object]:
+    database_reachable = _database_reachable(pool, settings.readiness_timeout_seconds)
     checks = {
         "gemini_api_key_set": bool(settings.gemini_api_key),
         "openrouter_api_key_set": bool(settings.openrouter_api_key),
         "supabase_configured": bool(settings.supabase_url and settings.supabase_secret_key),
         "database_configured": bool(settings.database_url),
+        "database_reachable": database_reachable,
     }
 
     can_serve = (
         settings.llm_providers_configured
         and checks["supabase_configured"]
         and checks["database_configured"]
+        and checks["database_reachable"]
     )
 
     if not can_serve:

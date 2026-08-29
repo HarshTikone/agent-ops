@@ -59,6 +59,33 @@ describe('ChatPanel', () => {
     expect(onSendMessage).toHaveBeenCalledWith('compute 2+2')
   })
 
+  it('submits with Enter and keeps Shift+Enter as a newline', async () => {
+    const user = userEvent.setup()
+    const onSendMessage = vi.fn()
+    render(
+      <ChatPanel
+        session={makeSession()}
+        onSendMessage={onSendMessage}
+        submitting={false}
+        error={null}
+      />,
+    )
+    const input = screen.getByLabelText(/what should the agent do/i)
+    await user.type(input, 'line one{Shift>}{Enter}{/Shift}line two')
+    expect(onSendMessage).not.toHaveBeenCalled()
+    expect(input).toHaveValue('line one\nline two')
+
+    await user.type(input, '{Enter}')
+    expect(onSendMessage).toHaveBeenCalledWith('line one\nline two')
+  })
+
+  it('matches the server-side 8,000 character limit', () => {
+    render(
+      <ChatPanel session={makeSession()} onSendMessage={vi.fn()} submitting={false} error={null} />,
+    )
+    expect(screen.getByLabelText(/what should the agent do/i)).toHaveAttribute('maxlength', '8000')
+  })
+
   it('shows a submitting state and disables the form while a message is in flight', () => {
     render(
       <ChatPanel session={makeSession()} onSendMessage={vi.fn()} submitting={true} error={null} />,
@@ -115,5 +142,17 @@ describe('ChatPanel', () => {
       />,
     )
     expect(screen.getByRole('alert')).toHaveTextContent('network blip')
+  })
+
+  it('does not hide a message error when the session is awaiting approval', () => {
+    render(
+      <ChatPanel
+        session={makeSession({ status: 'awaiting_approval', task: 'save a note' })}
+        onSendMessage={vi.fn()}
+        submitting={false}
+        error="message response was interrupted"
+      />,
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent('message response was interrupted')
   })
 })

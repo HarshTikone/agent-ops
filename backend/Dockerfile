@@ -1,25 +1,39 @@
 # syntax=docker/dockerfile:1
-FROM python:3.11-slim AS base
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# System deps for building any wheels that need compilation (kept minimal;
-# most deps here ship manylinux wheels so this stays small).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
-COPY app ./app
+FROM python:3.11-slim AS runtime
 
-# Render (and most PaaS free tiers) injects $PORT at runtime — default to
-# 8000 for local `docker run` so the image is still useful standalone.
-ENV PORT=8000
+ENV PATH="/opt/venv/bin:${PATH}" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PORT=8000
+
+RUN groupadd --system agentops \
+    && useradd --system --gid agentops --home-dir /app --create-home agentops
+
+WORKDIR /app
+
+COPY --from=builder /opt/venv /opt/venv
+
+COPY --chown=agentops:agentops app ./app
+COPY --chown=agentops:agentops migrations ./migrations
+COPY --chown=agentops:agentops scripts ./scripts
+
+USER agentops
 EXPOSE 8000
 
-# JSON-array form wrapping a shell so $PORT still expands (Render injects it
-# at runtime) while keeping proper signal handling (SIGTERM forwards to
-# uvicorn instead of being swallowed by a shell-form CMD).
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"]
+
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]

@@ -5,15 +5,19 @@ import {
   approvePendingAction,
   createSession,
   getSession,
+  clearOperatorKey,
   getTrace,
   listSessions,
   rejectPendingAction,
   sendMessage,
+  setOperatorKey,
 } from './api'
 
 describe('api request helper (via the session/approval functions)', () => {
   beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn())
+    sessionStorage.clear()
+    setOperatorKey('test-operator-key')
   })
 
   afterEach(() => {
@@ -72,15 +76,32 @@ describe('api request helper (via the session/approval functions)', () => {
   it('sendMessage POSTs the content as the JSON body', async () => {
     ;(fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => ({}) })
     await sendMessage('s1', 'what is 2+2?')
-    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]!
     expect(init.method).toBe('POST')
     expect(JSON.parse(init.body)).toEqual({ content: 'what is 2+2?' })
+    expect(new Headers(init.headers).get('X-Agent-Ops-Key')).toBe('test-operator-key')
+  })
+
+  it('does not expose the operator key on read requests', async () => {
+    ;(fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => [] })
+    await listSessions()
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]!
+    expect(new Headers(init.headers).has('X-Agent-Ops-Key')).toBe(false)
+  })
+
+  it('rejects a mutation locally when no runtime operator key is present', async () => {
+    clearOperatorKey()
+    const error = await createSession().catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).status).toBe(401)
+    expect((error as ApiError).message).toContain('Enter the operator key')
+    expect(fetch).not.toHaveBeenCalled()
   })
 
   it('approvePendingAction POSTs with no body', async () => {
     ;(fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => ({}) })
     await approvePendingAction('p1')
-    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]!
     expect(url).toBe(`${API_BASE_URL}/approvals/p1/approve`)
     expect(init.method).toBe('POST')
   })
@@ -88,18 +109,18 @@ describe('api request helper (via the session/approval functions)', () => {
   it('rejectPendingAction POSTs the reason, defaulting to null', async () => {
     ;(fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => ({}) })
     await rejectPendingAction('p1')
-    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]!
     expect(JSON.parse(init.body)).toEqual({ reason: null })
 
     await rejectPendingAction('p1', 'not needed')
-    const [, init2] = (fetch as ReturnType<typeof vi.fn>).mock.calls[1]
+    const [, init2] = (fetch as ReturnType<typeof vi.fn>).mock.calls[1]!
     expect(JSON.parse(init2.body)).toEqual({ reason: 'not needed' })
   })
 
   it('listSessions GETs the plain sessions collection', async () => {
     ;(fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => [] })
     await listSessions()
-    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]!
     expect(url).toBe(`${API_BASE_URL}/sessions`)
     expect(init.method).toBeUndefined()
   })

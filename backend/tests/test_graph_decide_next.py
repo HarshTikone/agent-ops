@@ -31,10 +31,10 @@ class _ScriptedTool:
         self.calls: list[dict] = []
         self._outcomes = list(outcomes)
 
-    def run(self, **kwargs) -> str:
-        self.calls.append(kwargs)
+    def invoke(self, arguments: dict[str, object]) -> str:
+        self.calls.append(arguments)
         if not self._outcomes:
-            raise AssertionError(f"{self.name}.run() called more times than scripted")
+            raise AssertionError(f"{self.name}.invoke() called more times than scripted")
         outcome = self._outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -128,6 +128,40 @@ def test_permanent_tool_failure_skips_retry_and_replans_immediately() -> None:
     assert any(
         "failed" in getattr(m, "content", "") for m in replan_call_messages
     ), "the re-plan LLM call must see why the previous step failed"
+
+
+def test_unexpected_tool_exception_is_sanitized_and_replanned() -> None:
+    calc = _ScriptedTool(
+        "calculator", [RuntimeError("password=hunter2 postgresql://user:secret@db/test")]
+    )
+    web = _ScriptedTool("web_search", ["found: x"])
+    tools = {"calculator": calc, "web_search": web, "notes_store": _empty_tool("notes_store")}
+    llm = _ScriptedLLM(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(id="c1", name="calculator", arguments={"expression": "2+2"})
+                ],
+                provider="gemini",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(id="c2", name="web_search", arguments={"query": "x"})],
+                provider="gemini",
+            ),
+            LLMResponse(content="final", tool_calls=[], provider="gemini"),
+        ]
+    )
+
+    result = build_graph(llm, tools, langchain_tools=[]).invoke(initial_state("recover"))
+
+    assert result["status"] == "done"
+    assert result["replans"] == 1
+    trace_text = " ".join(event["detail"] for event in result["trace"])
+    assert "hunter2" not in trace_text
+    assert "secret@" not in trace_text
+    assert "unexpected calculator failure" in trace_text
 
 
 def test_transient_failures_exhaust_retries_then_replan_then_give_up() -> None:

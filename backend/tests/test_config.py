@@ -45,8 +45,19 @@ def test_cors_origin_list_single_origin():
 
 
 def test_is_production_flag():
-    assert Settings(_env_file=None, environment="production").is_production is True
+    assert (
+        Settings(
+            _env_file=None, environment="production", agent_ops_api_key="production-test-key"
+        ).is_production
+        is True
+    )
     assert Settings(_env_file=None, environment="development").is_production is False
+
+
+def test_production_requires_operator_key(monkeypatch):
+    isolate_settings_env(monkeypatch)
+    with pytest.raises(ValidationError, match="AGENT_OPS_API_KEY"):
+        Settings(_env_file=None, environment="production", agent_ops_api_key="")
 
 
 def test_llm_providers_configured_requires_gemini_key():

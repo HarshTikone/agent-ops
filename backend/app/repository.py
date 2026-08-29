@@ -9,14 +9,24 @@ database the rest of the suite uses.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from psycopg.types.json import Jsonb
-from psycopg_pool import ConnectionPool
+
+from app.db import DbConnection, DbPool
+
+TraceLevel = Literal["info", "success", "warning", "error"]
+_UNSET = object()
 
 
-def create_session(pool: ConnectionPool, *, task: str = "") -> dict[str, Any]:
+def _required_row(row: dict[str, Any] | None, *, operation: str) -> dict[str, Any]:
+    if row is None:
+        raise RuntimeError(f"{operation} did not return the inserted row")
+    return row
+
+
+def create_session(pool: DbPool, *, task: str = "") -> dict[str, Any]:
     """`task` is normally left blank at creation time — ARCHITECTURE.md's
     flow is create-session-first, then the first `POST /messages` call
     supplies the task via `start_session` below. The optional override
@@ -24,18 +34,24 @@ def create_session(pool: ConnectionPool, *, task: str = "") -> dict[str, Any]:
     """
     with pool.connection() as conn:
         if task:
-            return conn.execute(
-                "INSERT INTO sessions (task, status) VALUES (%s, 'running') "
-                "RETURNING id, task, status, final_answer, created_at, updated_at",
-                (task,),
-            ).fetchone()
-        return conn.execute(
-            "INSERT INTO sessions DEFAULT VALUES "
-            "RETURNING id, task, status, final_answer, created_at, updated_at"
-        ).fetchone()
+            return _required_row(
+                conn.execute(
+                    "INSERT INTO sessions (task, status) VALUES (%s, 'running') "
+                    "RETURNING id, task, status, final_answer, created_at, updated_at",
+                    (task,),
+                ).fetchone(),
+                operation="create session",
+            )
+        return _required_row(
+            conn.execute(
+                "INSERT INTO sessions DEFAULT VALUES "
+                "RETURNING id, task, status, final_answer, created_at, updated_at"
+            ).fetchone(),
+            operation="create session",
+        )
 
 
-def start_session(pool: ConnectionPool, session_id: UUID, *, task: str) -> dict[str, Any] | None:
+def start_session(pool: DbPool, session_id: UUID, *, task: str) -> dict[str, Any] | None:
     """Moves a session from 'created' to 'running' and records its task —
     only succeeds if it's still 'created', so a second message can't
     silently restart an already-running session (the API layer turns a
@@ -51,7 +67,7 @@ def start_session(pool: ConnectionPool, session_id: UUID, *, task: str) -> dict[
         ).fetchone()
 
 
-def get_session(pool: ConnectionPool, session_id: UUID) -> dict[str, Any] | None:
+def get_session(pool: DbPool, session_id: UUID) -> dict[str, Any] | None:
     with pool.connection() as conn:
         return conn.execute(
             "SELECT id, task, status, final_answer, created_at, updated_at "
@@ -60,42 +76,98 @@ def get_session(pool: ConnectionPool, session_id: UUID) -> dict[str, Any] | None
         ).fetchone()
 
 
-def list_sessions(pool: ConnectionPool, *, limit: int = 50) -> list[dict[str, Any]]:
+def list_sessions(pool: DbPool, *, limit: int = 50) -> list[dict[str, Any]]:
     """Most recently created first — Day 4's session list (ADR-015 flagged
     this as deferred until the UI shape was known; it's a plain list, no
     pagination cursor, which is all a single-page session list needs)."""
     with pool.connection() as conn:
         return conn.execute(
-            "SELECT id, task, status, final_answer, created_at, updated_at "
-            "FROM sessions ORDER BY created_at DESC LIMIT %s",
+            """
+            SELECT
+                s.id,
+                s.task,
+                s.status,
+                s.final_answer,
+                s.created_at,
+                s.updated_at,
+                CASE WHEN pa.id IS NULL THEN NULL ELSE jsonb_build_object(
+                    'id', pa.id,
+                    'session_id', pa.session_id,
+                    'tool_name', pa.tool_name,
+                    'tool_args', pa.tool_args,
+                    'status', pa.status,
+                    'reason', pa.reason,
+                    'created_at', pa.created_at,
+                    'decided_at', pa.decided_at
+                ) END AS pending_action
+            FROM sessions AS s
+            LEFT JOIN LATERAL (
+                SELECT id, session_id, tool_name, tool_args, status, reason, created_at, decided_at
+                FROM pending_actions
+                WHERE session_id = s.id AND status = 'pending'
+                ORDER BY created_at DESC
+                LIMIT 1
+            ) AS pa ON TRUE
+            ORDER BY s.created_at DESC
+            LIMIT %s
+            """,
             (limit,),
         ).fetchall()
 
 
 def update_session_status(
-    pool: ConnectionPool, session_id: UUID, *, status: str, final_answer: str | None = None
+    pool: DbPool,
+    session_id: UUID,
+    *,
+    status: str,
+    final_answer: str | None | object = _UNSET,
 ) -> None:
     with pool.connection() as conn:
-        conn.execute(
-            "UPDATE sessions SET status = %s, final_answer = %s, updated_at = now() WHERE id = %s",
-            (status, final_answer, session_id),
+        update_session_status_on_connection(
+            conn, session_id, status=status, final_answer=final_answer
         )
 
 
-def add_message(
-    pool: ConnectionPool, session_id: UUID, *, role: str, content: str
-) -> dict[str, Any]:
+def update_session_status_on_connection(
+    conn: DbConnection,
+    session_id: UUID,
+    *,
+    status: str,
+    final_answer: str | None | object = _UNSET,
+) -> None:
+    if final_answer is _UNSET:
+        conn.execute(
+            "UPDATE sessions SET status = %s, updated_at = now() WHERE id = %s",
+            (status, session_id),
+        )
+        return
+    conn.execute(
+        "UPDATE sessions SET status = %s, final_answer = %s, updated_at = now() WHERE id = %s",
+        (status, final_answer, session_id),
+    )
+
+
+def add_message(pool: DbPool, session_id: UUID, *, role: str, content: str) -> dict[str, Any]:
     with pool.connection() as conn:
-        return conn.execute(
+        return add_message_on_connection(conn, session_id, role=role, content=content)
+
+
+def add_message_on_connection(
+    conn: DbConnection, session_id: UUID, *, role: str, content: str
+) -> dict[str, Any]:
+    return _required_row(
+        conn.execute(
             """
-            INSERT INTO messages (session_id, role, content) VALUES (%s, %s, %s)
-            RETURNING id, session_id, role, content, created_at
-            """,
+        INSERT INTO messages (session_id, role, content) VALUES (%s, %s, %s)
+        RETURNING id, session_id, role, content, created_at
+        """,
             (session_id, role, content),
-        ).fetchone()
+        ).fetchone(),
+        operation="add message",
+    )
 
 
-def list_messages(pool: ConnectionPool, session_id: UUID) -> list[dict[str, Any]]:
+def list_messages(pool: DbPool, session_id: UUID) -> list[dict[str, Any]]:
     with pool.connection() as conn:
         return conn.execute(
             "SELECT id, session_id, role, content, created_at FROM messages "
@@ -105,41 +177,91 @@ def list_messages(pool: ConnectionPool, session_id: UUID) -> list[dict[str, Any]
 
 
 def add_trace_event(
-    pool: ConnectionPool, session_id: UUID, *, node: str, detail: str, provider: str | None = None
-) -> dict[str, Any]:
+    pool: DbPool,
+    session_id: UUID,
+    *,
+    node: str,
+    detail: str,
+    sequence: int | None = None,
+    level: TraceLevel = "info",
+    provider: str | None = None,
+) -> dict[str, Any] | None:
     with pool.connection() as conn:
-        return conn.execute(
-            """
-            INSERT INTO trace_events (session_id, node, detail, provider) VALUES (%s, %s, %s, %s)
-            RETURNING id, session_id, node, detail, provider, created_at
-            """,
-            (session_id, node, detail, provider),
+        return add_trace_event_on_connection(
+            conn,
+            session_id,
+            node=node,
+            detail=detail,
+            sequence=sequence,
+            level=level,
+            provider=provider,
+        )
+
+
+def add_trace_event_on_connection(
+    conn: DbConnection,
+    session_id: UUID,
+    *,
+    node: str,
+    detail: str,
+    sequence: int | None = None,
+    level: TraceLevel = "info",
+    provider: str | None = None,
+) -> dict[str, Any] | None:
+    if sequence is None:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence "
+            "FROM trace_events WHERE session_id = %s",
+            (session_id,),
         ).fetchone()
+        if row is None:
+            raise RuntimeError("trace sequence query returned no row")
+        sequence = row["sequence"]
+    return conn.execute(
+        """
+        INSERT INTO trace_events (session_id, sequence, node, detail, level, provider)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (session_id, sequence) DO NOTHING
+        RETURNING id, session_id, sequence, node, detail, level, provider, created_at
+        """,
+        (session_id, sequence, node, detail, level, provider),
+    ).fetchone()
 
 
-def list_trace_events(pool: ConnectionPool, session_id: UUID) -> list[dict[str, Any]]:
+def list_trace_events(pool: DbPool, session_id: UUID) -> list[dict[str, Any]]:
     with pool.connection() as conn:
         return conn.execute(
-            "SELECT id, session_id, node, detail, provider, created_at FROM trace_events "
-            "WHERE session_id = %s ORDER BY id",
+            "SELECT id, session_id, sequence, node, detail, level, provider, created_at "
+            "FROM trace_events WHERE session_id = %s ORDER BY sequence",
             (session_id,),
         ).fetchall()
 
 
 def create_pending_action(
-    pool: ConnectionPool, session_id: UUID, *, tool_name: str, tool_args: dict[str, Any]
+    pool: DbPool, session_id: UUID, *, tool_name: str, tool_args: dict[str, Any]
 ) -> dict[str, Any]:
     with pool.connection() as conn:
-        return conn.execute(
+        return create_pending_action_on_connection(
+            conn, session_id, tool_name=tool_name, tool_args=tool_args
+        )
+
+
+def create_pending_action_on_connection(
+    conn: DbConnection, session_id: UUID, *, tool_name: str, tool_args: dict[str, Any]
+) -> dict[str, Any]:
+    return _required_row(
+        conn.execute(
             """
-            INSERT INTO pending_actions (session_id, tool_name, tool_args) VALUES (%s, %s, %s)
-            RETURNING id, session_id, tool_name, tool_args, status, reason, created_at, decided_at
-            """,
+        INSERT INTO pending_actions (session_id, tool_name, tool_args) VALUES (%s, %s, %s)
+        RETURNING id, session_id, tool_name, tool_args, status, reason, created_at, decided_at
+        """,
             (session_id, tool_name, Jsonb(tool_args)),
-        ).fetchone()
+        ).fetchone(),
+        operation="create pending action",
+    )
 
 
-def get_pending_action(pool: ConnectionPool, pending_action_id: UUID) -> dict[str, Any] | None:
+def get_pending_action(pool: DbPool, pending_action_id: UUID) -> dict[str, Any] | None:
     with pool.connection() as conn:
         return conn.execute(
             "SELECT id, session_id, tool_name, tool_args, status, reason, created_at, decided_at "
@@ -148,7 +270,7 @@ def get_pending_action(pool: ConnectionPool, pending_action_id: UUID) -> dict[st
         ).fetchone()
 
 
-def get_pending_action_for_session(pool: ConnectionPool, session_id: UUID) -> dict[str, Any] | None:
+def get_pending_action_for_session(pool: DbPool, session_id: UUID) -> dict[str, Any] | None:
     """The one 'pending' action currently blocking a session's run, if any —
     at most one at a time, since the graph itself blocks on interrupt()
     until it's decided (ADR-015). Lets a session response embed the exact
@@ -162,7 +284,7 @@ def get_pending_action_for_session(pool: ConnectionPool, session_id: UUID) -> di
 
 
 def decide_pending_action(
-    pool: ConnectionPool, pending_action_id: UUID, *, status: str, reason: str | None = None
+    pool: DbPool, pending_action_id: UUID, *, status: str, reason: str | None = None
 ) -> dict[str, Any] | None:
     """Moves a pending_action out of 'pending'. Only succeeds if it is still
     'pending' -- the WHERE clause makes double-deciding (e.g. two concurrent
@@ -181,7 +303,7 @@ def decide_pending_action(
         ).fetchone()
 
 
-def mark_pending_action_executed(pool: ConnectionPool, pending_action_id: UUID) -> None:
+def mark_pending_action_executed(pool: DbPool, pending_action_id: UUID) -> None:
     with pool.connection() as conn:
         conn.execute(
             "UPDATE pending_actions SET status = 'executed' WHERE id = %s AND status = 'approved'",
@@ -189,7 +311,7 @@ def mark_pending_action_executed(pool: ConnectionPool, pending_action_id: UUID) 
         )
 
 
-def write_note(pool: ConnectionPool, session_id: UUID, *, key: str, content: str) -> None:
+def write_note(pool: DbPool, session_id: UUID, *, key: str, content: str) -> None:
     with pool.connection() as conn:
         conn.execute(
             """
@@ -200,7 +322,7 @@ def write_note(pool: ConnectionPool, session_id: UUID, *, key: str, content: str
         )
 
 
-def read_note(pool: ConnectionPool, session_id: UUID, *, key: str) -> str | None:
+def read_note(pool: DbPool, session_id: UUID, *, key: str) -> str | None:
     with pool.connection() as conn:
         row = conn.execute(
             "SELECT content FROM session_memory WHERE session_id = %s AND key = %s",
@@ -209,7 +331,7 @@ def read_note(pool: ConnectionPool, session_id: UUID, *, key: str) -> str | None
     return row["content"] if row else None
 
 
-def list_note_keys(pool: ConnectionPool, session_id: UUID) -> list[str]:
+def list_note_keys(pool: DbPool, session_id: UUID) -> list[str]:
     with pool.connection() as conn:
         rows = conn.execute(
             "SELECT key FROM session_memory WHERE session_id = %s ORDER BY key",

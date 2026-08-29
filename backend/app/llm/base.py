@@ -9,7 +9,7 @@ anything.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.messages.tool import tool_call as make_tool_call
@@ -51,7 +51,10 @@ class LLMResponse:
     provider: str
 
 
+@runtime_checkable
 class LLMProvider(Protocol):
+    name: str
+
     def generate(
         self, messages: list[BaseMessage], tools: list[BaseTool] | None = None
     ) -> LLMResponse: ...

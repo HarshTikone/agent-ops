@@ -13,6 +13,10 @@ import type { TraceEvent } from '../lib/api'
 type Tone = 'default' | 'success' | 'warning' | 'error'
 
 function toneFor(event: TraceEvent): Tone {
+  if (event.level !== 'info') return event.level
+
+  // Compatibility fallback for rows created before structured levels were
+  // introduced. New events always use the explicit field above.
   const detail = event.detail
   if (
     detail.includes('FAILED (permanent)') ||

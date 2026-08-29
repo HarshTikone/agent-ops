@@ -5,11 +5,13 @@ schemas the planner binds to the LLM so it can select among them.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from uuid import UUID
 
+import httpx
 from langchain_core.tools import StructuredTool
-from psycopg_pool import ConnectionPool
 
+from app.db import DbPool
 from app.tools.base import Tool
 from app.tools.calculator import CalculatorTool
 from app.tools.notes_store import NotesStoreTool
@@ -17,12 +19,16 @@ from app.tools.web_search import WebSearchTool
 
 
 def build_tool_registry(
-    *, tavily_api_key: str, db_pool: ConnectionPool, session_id: UUID
+    *,
+    tavily_api_key: str,
+    db_pool: DbPool,
+    session_id: UUID,
+    http_client: httpx.Client | None = None,
 ) -> dict[str, Tool]:
     tools: list[Tool] = [
         CalculatorTool(),
         NotesStoreTool(db_pool, session_id),
-        WebSearchTool(tavily_api_key),
+        WebSearchTool(tavily_api_key, client=http_client),
     ]
     return {t.name: t for t in tools}
 
@@ -42,8 +48,8 @@ def to_langchain_tools(registry: dict[str, Tool]) -> list[StructuredTool]:
     ]
 
 
-def _make_forwarder(tool: Tool):
+def _make_forwarder(tool: Tool) -> Callable[..., str]:
     def _forward(**kwargs: object) -> str:
-        return tool.run(**kwargs)
+        return tool.invoke(kwargs)
 
     return _forward

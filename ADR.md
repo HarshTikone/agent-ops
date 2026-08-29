@@ -1440,3 +1440,188 @@ emit a separate structured severity field.
   pending actions without an intervening unmount, which the one-pending-
   action-at-a-time invariant (ADR-015) rules out — flagged as a assumption
   the component relies on rather than something it enforces itself.
+
+---
+
+## ADR-020: Atomic result application, sequenced traces, and tool-boundary execution records
+
+**Date:** 2026-08-27 (reliability-foundation sprint)
+
+**Context**
+
+The Day 3 persistence bridge applied one graph result through several
+independently committed repository calls. A failure could leave trace rows or a
+pending action committed without the corresponding session transition. Trace
+resume logic also inferred the next event from the number of stored rows, and
+approval handling marked an action `executed` before checkpoint loading began.
+Those behaviors made the audit trail—the product's central promise—least
+reliable on precisely the failure paths where it matters most.
+
+**Decision: all application-table writes for one graph result share one explicit
+PostgreSQL transaction.** Repository operations used by `_apply_result` accept
+the transaction's existing connection. A write failure rolls back trace rows,
+messages, pending actions, and session status together. Status-only updates do
+not overwrite `final_answer`, and a graph exit with neither an interrupt nor a
+terminal state is treated as an error rather than silently leaving `running`.
+
+**Decision: trace identity is `(session_id, sequence)`.** Every graph node
+creates a typed event with a monotonic sequence, structured level, and optional
+provider. Persistence uses `ON CONFLICT DO NOTHING`, making a replay
+idempotent. The frontend consumes `level`; detail-text parsing remains only for
+legacy rows. Migration `0003` backfills existing sequences in original row
+order before enforcing uniqueness.
+
+**Decision: `executed` means the irreversible tool attempt has begun.** The
+approval endpoint records the human decision but does not mark execution. It
+passes a narrow callback into the graph, and `tool_call` invokes that callback
+after resolving the tool and immediately before calling it. Failures before
+the node leave the action `approved`; classified tool failures after the
+boundary leave it `executed` because an attempt genuinely occurred.
+
+**Decision: ordinary CI is deterministic and secret-free.** GitHub Actions
+uses an isolated pgvector/PostgreSQL service, runs migrations, and excludes
+tests marked `live`. A manual workflow owns external-provider smoke tests.
+Mypy and strict TypeScript checks are required alongside the existing lint,
+test, and build gates.
+
+**What we gave up**
+
+- LangGraph checkpoint commits and application-table commits remain separate.
+  They are controlled by different persistence layers and cannot share one
+  transaction. Sequence-based idempotency makes recovery safe, but does not
+  pretend the cross-system boundary is atomic.
+- If an external side effect succeeds and the process dies before the
+  `executed` database transition commits, perfect exactly-once knowledge is
+  impossible without a tool-specific idempotency key or transactional outbox.
+  The current transition is placed immediately before invocation because it
+  avoids falsely reporting execution when checkpoint loading fails and gives
+  the most truthful state available with this schema.
+- Live provider behavior is no longer exercised on every pull request. The
+  manual smoke workflow preserves that coverage without making forks, quotas,
+  or third-party outages part of the correctness gate.
+
+---
+
+## ADR-021: Single-operator API security and lifespan-owned infrastructure
+
+**Date:** 2026-08-28 (security-and-operations sprint)
+
+**Context**
+
+The application exposed quota-consuming and state-changing routes without an
+authentication boundary, treated configured database strings as proof of
+readiness, and let individual tool instances own network clients. That was
+acceptable during local construction but unsafe for a public deployment.
+
+**Decision: mutations use one explicit operator credential.** Every `POST`
+requires `X-Agent-Ops-Key`, compared in constant time to the secret-valued
+`AGENT_OPS_API_KEY` setting. Production refuses to start with a blank key.
+The browser accepts the key at runtime and keeps it in `sessionStorage`; it is
+never a build-time Vite variable. Read-only observability remains public for
+the portfolio demo. Per-IP in-memory limits are appropriate because deployment
+is deliberately single-instance.
+
+**Decision: the application lifespan owns infrastructure.** Startup creates
+the PostgreSQL pool and shared HTTP client; shutdown closes each once. Pool
+connections are checked before handoff. Readiness now runs a timeout-bounded
+`SELECT 1`, while liveness remains dependency-free.
+
+**Decision: unexpected adapter exceptions become permanent step failures.**
+Expected `ToolError` classification remains first. A final backstop records a
+sanitized trace summary and a redacted traceback without persisting upstream
+bodies, connection credentials, authorization headers, or tokens.
+
+**Decision: the deployment artifact is a non-root multi-stage image.** Build
+tooling remains in the builder stage; migrations and their runner ship in the
+runtime stage; Docker health targets `/health`, not readiness.
+
+**What we gave up**
+
+- The browser-visible key identifies one operator, not individual users. It is
+  an operational gate, not an account or authorization system.
+- In-memory limits are per process. Horizontal scaling remains out of scope;
+  distributed storage must be introduced before adding instances.
+- Public read routes expose session/trace metadata by design. Revisit that
+  threat model before storing sensitive end-user content.
+
+---
+
+## ADR-022: Optional failover is represented by provider composition, not empty credentials
+
+**Date:** 2026-08-28 (release-candidate sprint)
+
+**Context**
+
+The primary Gemini provider is sufficient to serve requests, but the original
+dependency factory always constructed an OpenRouter client. A valid
+Gemini-only deployment therefore crashed during dependency construction even
+though readiness deliberately classified it as degraded-but-serviceable.
+
+**Decision**
+
+Construct Gemini whenever its required settings are present. Construct and
+wrap it in `FailoverProvider` only when both OpenRouter key and model are set;
+reject half-configured fallback settings at application startup. The provider
+factory's runtime shape now matches ADR-009's readiness semantics.
+
+**What we gave up**
+
+- A degraded deployment has no automatic provider failover until both optional
+  OpenRouter settings are supplied.
+- Provider construction remains process-cached; rotating a provider key needs
+  a restart.
+
+---
+
+## ADR-023: Graph work and retry limits have one semantic source of truth
+
+**Date:** 2026-08-28 (release-candidate sprint)
+
+**Context**
+
+Planner steps, tool calls, and retry attempts were previously bounded in
+different nodes with overlapping counters. Boundary values could be accepted
+by one node and rejected by the next, and calculator input could create work
+far beyond the graph's nominal step bound.
+
+**Decision**
+
+Keep graph bounds in `app/graph/limits.py` and define counters by completed
+work: a step/tool call is allowed only while the completed count is below its
+maximum. Retry counts advance exactly once per failed attempt. Tool adapters
+also enforce their own input-complexity bounds because graph limits cannot
+make one individual operation safe.
+
+**What we gave up**
+
+- Limits are fixed deployment policy, not per-session user configuration.
+- A task that genuinely needs more work fails clearly instead of extending a
+  run dynamically.
+
+---
+
+## ADR-024: Structured trace metadata supersedes ADR-019's text heuristic
+
+**Date:** 2026-08-28 (release-candidate sprint)
+
+**Context**
+
+ADR-019 inferred trace tone from words inside free-form detail text. That made
+presentation depend on copy and could not reliably expose provider failover or
+deduplicate replayed graph events.
+
+**Decision**
+
+Every new trace row carries a monotonic per-session `sequence`, a structured
+`level`, and the producing `provider` when applicable. Persistence uses
+`(session_id, sequence)` for replay idempotency, and the UI renders `level`
+directly. Text inference remains only as a compatibility fallback for rows
+created before structured levels existed; this decision supersedes that part
+of ADR-019.
+
+**What we gave up**
+
+- Old rows cannot be perfectly reconstructed; their heuristic presentation is
+  retained rather than rewritten.
+- LangGraph checkpoints and application trace rows remain separate commits, as
+  already accepted in ADR-020.

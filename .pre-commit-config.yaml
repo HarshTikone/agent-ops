@@ -6,35 +6,35 @@
 # Requires backend/.venv (or an active env with requirements-dev.txt
 # installed) and frontend/node_modules to already exist.
 repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.7
+    hooks:
+      - id: ruff
+        name: backend ruff check
+        files: ^backend/.*\.py$
+        args: [--config, backend/pyproject.toml]
+
+  - repo: https://github.com/psf/black-pre-commit-mirror
+    rev: 26.3.1
+    hooks:
+      - id: black
+        name: backend black --check
+        files: ^backend/.*\.py$
+        args: [--check, --config, backend/pyproject.toml]
+
   - repo: local
     hooks:
-      - id: backend-ruff
-        name: backend ruff check
-        entry: bash -c 'cd backend && ruff check .'
-        language: system
-        files: ^backend/.*\.py$
-        pass_filenames: false
-
-      - id: backend-black
-        name: backend black --check
-        entry: bash -c 'cd backend && black --check .'
-        language: system
-        files: ^backend/.*\.py$
-        pass_filenames: false
-
       - id: frontend-eslint
         name: frontend eslint
-        entry: bash -c 'cd frontend && npm run lint'
+        entry: npm --prefix frontend exec -- eslint
         language: system
         files: ^frontend/.*\.(ts|tsx)$
-        pass_filenames: false
 
       - id: frontend-prettier
         name: frontend prettier --check
-        entry: bash -c 'cd frontend && npm run format:check'
+        entry: npm --prefix frontend exec -- prettier --check
         language: system
         files: ^frontend/.*\.(ts|tsx|css|json|md)$
-        pass_filenames: false
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0

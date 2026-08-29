@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useState, type FormEvent, type KeyboardEvent } from 'react'
 import type { Session } from '../lib/api'
 
 /**
@@ -19,12 +19,20 @@ export function ChatPanel({
   error: string | null
 }) {
   const [draft, setDraft] = useState('')
+  const maxMessageLength = 8_000
 
   if (session.status === 'created') {
     const handleSubmit = (e: FormEvent) => {
       e.preventDefault()
       const content = draft.trim()
-      if (content) onSendMessage(content)
+      if (content && content.length <= maxMessageLength) onSendMessage(content)
+    }
+
+    const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault()
+        event.currentTarget.form?.requestSubmit()
+      }
     }
 
     return (
@@ -36,11 +44,17 @@ export function ChatPanel({
           id="task-input"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={handleKeyDown}
           disabled={submitting}
+          maxLength={maxMessageLength}
+          aria-describedby="task-input-limit"
           rows={3}
           className="rounded border border-neutral-700 bg-neutral-950 p-2 text-sm text-neutral-100 disabled:opacity-50"
           placeholder="e.g. What is 47 times 89? Use the calculator tool."
         />
+        <p id="task-input-limit" className="text-xs text-neutral-500">
+          {draft.length.toLocaleString()} / {maxMessageLength.toLocaleString()} characters
+        </p>
         {error && (
           <p role="alert" className="text-sm text-red-400">
             {error}
@@ -48,7 +62,7 @@ export function ChatPanel({
         )}
         <button
           type="submit"
-          disabled={submitting || draft.trim() === ''}
+          disabled={submitting || draft.trim() === '' || draft.trim().length > maxMessageLength}
           className="self-start rounded bg-blue-700 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-600 disabled:opacity-50"
         >
           {submitting ? 'Thinking…' : 'Send'}

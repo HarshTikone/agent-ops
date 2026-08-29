@@ -22,6 +22,8 @@ logger = logging.getLogger("agent_ops.llm.failover")
 
 
 class FailoverProvider:
+    name = "failover"
+
     def __init__(self, primary: LLMProvider, fallback: LLMProvider) -> None:
         self._primary = primary
         self._fallback = fallback
@@ -34,8 +36,8 @@ class FailoverProvider:
         except TransientProviderError as exc:
             logger.warning(
                 "provider_failover from=%s to=%s reason=%s",
-                getattr(self._primary, "name", "primary"),
-                getattr(self._fallback, "name", "fallback"),
+                self._primary.name,
+                self._fallback.name,
                 exc,
             )
             return self._fallback.generate(messages, tools)
