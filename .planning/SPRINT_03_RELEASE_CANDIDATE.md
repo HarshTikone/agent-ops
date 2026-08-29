@@ -2,7 +2,7 @@
 
 > **Status: production QA in progress (2026-08-29).** The backend and frontend
 > are public and production migrations are current. The two P2 QA findings are
-> fixed locally; operator-key approval/rejection acceptance and durable screenshot
+> fixed in production; operator-key approval/rejection acceptance and durable screenshot
 > evidence are still required before sprint completion.
 
 ## Goal and constraints
@@ -108,7 +108,7 @@ domain work is included.
 | Current backend regression | Passed | Ruff, mypy (36 source files), 116 passed, 39 database-dependent skipped, 1 live test deselected |
 | Production migration | Passed | Release image applied 0003 and 0004 on 2026-08-29; immediate repeat skipped 0001–0004 |
 | Public schema smoke | Passed | Public session detail and structured trace endpoint succeeded after migration |
-| Vercel redesign deployment | Passed | Production serves commit `a942c8d` at <https://agent-ops-sage.vercel.app> |
+| Vercel redesign deployment | Passed | Production serves QA-remediation commit `8ff2217` at <https://agent-ops-sage.vercel.app> |
 | Render CORS deployment | Passed | Deploy `dep-da97kg2jnfac73cussd0` succeeded for commit `a942c8d`; exact origin is `https://agent-ops-sage.vercel.app` |
 | Production security smoke | Passed | Allowed preflight 200 with exact origin; disallowed origin 400 without allow-origin header; unauthenticated `POST /sessions` 401 |
 | Public redesigned UI smoke | Passed | Readiness displayed as ready; session list, detail, and trace empty state loaded through Vercel |
@@ -121,7 +121,7 @@ production API and Supabase production database.
 
 | Area | Result | Evidence / review |
 |---|---|---|
-| Deployment version | Pass | Vercel and Render both serve commit `a942c8d`. |
+| Deployment version | Pass | Vercel serves frontend commit `8ff2217`; the Render API remains healthy with the release backend. |
 | Free-tier cold start | Pass | The UI retained accessible loading states and recovered to `Backend status: ready` with live sessions after about 30 seconds. |
 | API health and readiness | Pass | `/health` and `/health/ready` returned 200. |
 | CORS boundary | Pass | Exact Vercel-origin preflight returned 200 with the matching allow-origin header; an unrelated origin returned 400 without that header. |
@@ -130,7 +130,7 @@ production API and Supabase production database.
 | SPA and not-found routing | Pass | Direct session URLs and an unknown production path both resolved through the Vercel rewrite; the unknown path rendered the accessible recovery page. |
 | Session detail and trace | Pass | The public deep link rendered one page heading, labeled Chat/Trace regions, message history, status, and trace empty state. |
 | Invalid/missing session errors | Pass | Malformed and unknown session URLs rendered concise accessible alerts while retaining navigation back to all sessions. |
-| Session soft-hide | **Fixed — Pass** | Hidden sessions now expose a persistent “Show all hidden sessions” recovery action after reload; focused and full regression suites pass. |
+| Session soft-hide | **Fixed — Pass** | Production exposed “Show all hidden sessions” for the QA-hidden row; restoring it and refreshing kept the session visible. Focused and full regression suites pass. |
 | Repository formatting gate | **Fixed — Pass** | The project Prettier check now exits 0 across the complete frontend tree. |
 | Frontend lint | Pass | `npm run lint` exited 0. |
 | Frontend component suite | Pass | 13 files and 80 tests passed. |
