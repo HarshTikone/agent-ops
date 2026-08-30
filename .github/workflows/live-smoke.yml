@@ -14,8 +14,8 @@ jobs:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       # Model identifiers are public configuration, not credentials. Keeping
       # this alongside .env.example prevents an otherwise-valid key from
-      # becoming a half-configured fallback when no model secret exists.
-      OPENROUTER_MODEL: nvidia/nemotron-3-super-120b-a12b:free
+      # becoming a half-configured fallback while preserving key optionality.
+      OPENROUTER_MODEL: ${{ secrets.OPENROUTER_API_KEY != '' && 'nvidia/nemotron-3-super-120b-a12b:free' || '' }}
       TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -28,9 +28,25 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements-dev.txt
       - run: pip install -r requirements-dev.txt
+      - name: Build release image
+        run: docker build --tag agent-ops-backend:live .
       - name: Apply migrations
-        run: python -m scripts.migrate
+        run: >-
+          docker run --rm
+          -e DATABASE_URL
+          agent-ops-backend:live
+          python -m scripts.migrate
       - name: Verify release dependencies
-        run: python -m scripts.release_check
+        run: >-
+          docker run --rm
+          -e GEMINI_API_KEY
+          -e OPENROUTER_API_KEY
+          -e OPENROUTER_MODEL
+          -e TAVILY_API_KEY
+          -e DATABASE_URL
+          -e SUPABASE_URL
+          -e SUPABASE_SECRET_KEY
+          agent-ops-backend:live
+          python -m scripts.release_check
       - name: Run opt-in live tests
         run: pytest -m live -o addopts="" -v
