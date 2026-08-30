@@ -23,7 +23,7 @@ target-version = ["py311"]
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
-addopts = "-m 'not live'"
+addopts = "-m 'not live' --cov=app --cov-report=term-missing --cov-fail-under=80"
 markers = ["live: calls externally hosted providers or shared infrastructure"]
 
 [tool.mypy]

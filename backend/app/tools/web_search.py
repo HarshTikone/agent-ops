@@ -8,6 +8,8 @@ Auth is a bearer header (`Authorization: Bearer tvly-...`), not a body field
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 import httpx
 from pydantic import BaseModel, Field, field_validator
 
@@ -19,6 +21,11 @@ _REQUEST_TIMEOUT_SECONDS = 15
 
 class WebSearchArgs(BaseModel):
     query: str = Field(min_length=1, max_length=500, description="Search query")
+    include_domains: list[str] = Field(
+        default_factory=list,
+        max_length=5,
+        description="Official domains that every returned result must match",
+    )
 
     @field_validator("query")
     @classmethod
@@ -27,6 +34,35 @@ class WebSearchArgs(BaseModel):
         if not value:
             raise ValueError("search query must not be blank")
         return value
+
+    @field_validator("include_domains")
+    @classmethod
+    def normalize_domains(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for raw_domain in value:
+            domain = raw_domain.strip().lower().rstrip(".")
+            if (
+                not domain
+                or "://" in domain
+                or "/" in domain
+                or "@" in domain
+                or ":" in domain
+                or "." not in domain
+                or any(
+                    not label
+                    or len(label) > 63
+                    or label.startswith("-")
+                    or label.endswith("-")
+                    or not all(
+                        character in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in label
+                    )
+                    for label in domain.split(".")
+                )
+            ):
+                raise ValueError("include_domains entries must be plain hostnames")
+            if domain not in normalized:
+                normalized.append(domain)
+        return normalized
 
 
 class WebSearchTool:
@@ -43,17 +79,20 @@ class WebSearchTool:
 
     def invoke(self, arguments: dict[str, object]) -> str:
         args = self.args_schema.model_validate(arguments)
-        return self.run(query=args.query)
+        return self.run(query=args.query, include_domains=args.include_domains)
 
-    def run(self, *, query: str) -> str:
+    def run(self, *, query: str, include_domains: list[str] | None = None) -> str:
         if not self._api_key:
             raise ToolError("TAVILY_API_KEY not configured", transient=False)
 
         try:
+            payload: dict[str, object] = {"query": query, "max_results": 5}
+            if include_domains:
+                payload["include_domains"] = include_domains
             response = self._client.post(
                 TAVILY_SEARCH_URL,
                 headers={"Authorization": f"Bearer {self._api_key}"},
-                json={"query": query, "max_results": 5},
+                json=payload,
             )
         except httpx.TimeoutException as exc:
             raise ToolError(f"web search timed out: {exc}", transient=True) from exc
@@ -73,7 +112,22 @@ class WebSearchTool:
             raise ToolError(f"web search returned malformed JSON: {exc}", transient=False) from exc
 
         results = data.get("results", [])
+        if include_domains:
+            allowed_domains = tuple(include_domains)
+            results = [
+                result
+                for result in results
+                if (
+                    (hostname := urlparse(str(result.get("url", ""))).hostname)
+                    and any(
+                        hostname == domain or hostname.endswith(f".{domain}")
+                        for domain in allowed_domains
+                    )
+                )
+            ]
         if not results:
+            if include_domains:
+                return "No results found from the requested official domains."
             return "No results found."
         lines = [
             f"- {r.get('title', '')}: {r.get('url', '')} — {r.get('content', '')[:200]}"

@@ -109,8 +109,14 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _require_operator_key_in_production(self) -> "Settings":
-        if self.is_production and not self.agent_ops_api_key.get_secret_value():
-            raise ValueError("AGENT_OPS_API_KEY must be set in production")
+        operator_key = self.agent_ops_api_key.get_secret_value()
+        if self.is_production and (
+            operator_key != operator_key.strip() or len(operator_key.encode("utf-8")) < 32
+        ):
+            raise ValueError(
+                "AGENT_OPS_API_KEY must contain at least 32 bytes without surrounding whitespace "
+                "in production"
+            )
         return self
 
 

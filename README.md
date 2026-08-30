@@ -43,11 +43,12 @@ python -m scripts.migrate       # applies backend/migrations/*.sql — run once,
 uvicorn app.main:app --reload
 ```
 
-Set a strong `AGENT_OPS_API_KEY`, then check the service with
+Set an `AGENT_OPS_API_KEY` containing at least 32 bytes, then check the service with
 `curl http://localhost:8000/health` and
 `curl http://localhost:8000/health/ready` (the second reports which of
 Gemini/OpenRouter/Supabase/DB config is missing, without ever printing a
-secret value).
+secret value). Readiness confirms configuration and database reachability;
+it does not spend provider requests or prove that configured credentials are valid.
 
 Sessions, messages, the trace log, and the approval state machine (Day 3)
 live in Postgres — `POST /sessions`, `GET /sessions`,
@@ -133,11 +134,15 @@ Release order:
    `docker run --rm --env-file .env agent-ops-backend:release python -m scripts.migrate`.
    The runner holds a PostgreSQL advisory lock, records each applied filename,
    and is safe to repeat. It is deliberately not part of API startup.
-3. Create the Render service from `render.yaml`, fill every `sync: false`
+3. With the same dashboard environment, actively verify database, Supabase,
+   Gemini, Tavily, and the optional OpenRouter fallback:
+   `docker run --rm --env-file .env agent-ops-backend:release python -m scripts.release_check`.
+   This command logs only check names and outcomes, never provider response bodies.
+4. Create the Render service from `render.yaml`, fill every `sync: false`
    variable, and verify `/health` over HTTPS.
-4. Import the repository into Vercel with `frontend` as the Root Directory.
+5. Import the repository into Vercel with `frontend` as the Root Directory.
    Set `VITE_API_URL` to the exact Render origin and deploy.
-5. Set Render's `CORS_ORIGINS` to the exact scheme-qualified Vercel production
+6. Set Render's `CORS_ORIGINS` to the exact scheme-qualified Vercel production
    origin, redeploy, then run the authenticated approval and rejection flows.
 
 Application rollback means redeploying the previous known-good commit. Database
@@ -152,7 +157,9 @@ walkthrough evidence are recorded in `.planning/SPRINT_03_RELEASE_CANDIDATE.md`.
   retrying the demo.
 - **Render** free web services spin down after 15 minutes idle. The first
   request after a while will take 30-60 seconds to cold-start — that's
-  expected, not a bug, if you're smoke-testing the live URL.
+  expected, not a bug, if you're smoke-testing the live URL. The frontend
+  retries idempotent reads once and shows cold-start guidance; mutations are
+  never automatically retried because their server outcome may be ambiguous.
 - **OpenRouter** free models cap at 20 requests/minute and 50/day per model
   with no card on file — reserved for the fallback path and its own tests,
   not routine dev-loop iteration (use Gemini for that).

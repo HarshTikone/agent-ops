@@ -53,7 +53,7 @@ jobs:
       - name: Apply migrations
         run: python -m scripts.migrate
 
-      - name: Test (secret-free pytest)
+      - name: Test with coverage (secret-free pytest)
         run: pytest -v
 
   frontend:

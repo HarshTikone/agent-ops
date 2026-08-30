@@ -119,7 +119,9 @@ case any one tool, and each adapter's failure path is exercised by a test
 gate: `pending -> approved -> executed` or `pending -> rejected` (terminal).
 Persisted in Supabase (`pending_actions` table) so a pending approval
 survives a backend restart or a page reload — the frontend's approval modal
-is a view onto this state, not the source of truth for it.
+is a view onto this state, not the source of truth for it. A rejection exits
+the graph immediately: it is never converted into a tool failure, replanned,
+or allowed to produce a second approval prompt.
 
 **Trace log (Day 3)** — append-only `trace_events` table: one row per agent
 decision or tool call, with session id, node name, input, output/error,
@@ -344,7 +346,9 @@ All state-changing routes require an `X-Agent-Ops-Key` value matched against
 `AGENT_OPS_API_KEY` with a constant-time comparison. The frontend accepts the
 single-operator credential at runtime and stores it only in `sessionStorage`;
 read-only observability routes never receive it. SlowAPI applies per-IP limits
-at the four mutation boundaries.
+at the four mutation boundaries. In production Uvicorn trusts forwarding
+headers only at the Render proxy boundary, so rate limits use the caller's
+normalized address instead of grouping all traffic under Render's internal IP.
 
 FastAPI lifespan now owns the PostgreSQL pool and one shared `httpx.Client`.
 The pool checks connections before use, while `/health/ready` acquires a

@@ -15,7 +15,13 @@ npm run dev
 `VITE_API_URL` is optional during development and defaults to
 `http://localhost:8000`. Production builds intentionally fail when it is
 missing. The operator key is never a Vite variable: enter it in the running
-application, where it is kept in `sessionStorage` for the current tab.
+application, where it is kept in `sessionStorage` for the current tab. The
+production key must contain at least 32 UTF-8 bytes; the UI reports rather
+than hides storage failures in privacy-restricted browsers.
+
+Idempotent reads time out and retry once to tolerate Render cold starts.
+Messages and approval decisions are never automatically retried, because a
+request can finish on the server after the browser loses its response.
 
 ## Checks
 

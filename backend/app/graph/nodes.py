@@ -33,7 +33,10 @@ PLANNER_SYSTEM_PROMPT = (
     "into the minimum sequence of tool calls needed to complete it. Call the "
     "available tools directly — each tool call you make becomes one step of "
     "the plan, executed in the order you call them. If the task needs no "
-    "tool, answer directly instead of calling a tool."
+    "tool, answer directly instead of calling a tool. When the user asks for "
+    "official, primary, or explicitly named web sources, web_search MUST use "
+    "include_domains with only the requested official hostnames. Never silently "
+    "substitute third-party sources for requested official evidence."
 )
 
 
@@ -115,7 +118,16 @@ def approval_gate_node(state: GraphState) -> dict:
     if not _needs_approval(step):
         return {}
 
-    approved = interrupt({"tool_name": step.name, "tool_args": step.arguments, "step_id": step.id})
+    decision = interrupt({"tool_name": step.name, "tool_args": step.arguments, "step_id": step.id})
+    if isinstance(decision, dict):
+        approved = bool(decision.get("approved"))
+        raw_reason = decision.get("reason")
+        reason = sanitize_error(str(raw_reason), max_length=500) if raw_reason else None
+    else:
+        # Retain compatibility with checkpoints created before decisions
+        # carried their optional rejection reason in the resume payload.
+        approved = bool(decision)
+        reason = None
 
     if approved:
         return {
@@ -129,33 +141,34 @@ def approval_gate_node(state: GraphState) -> dict:
                 ),
             ]
         }
+    reason_suffix = f" reason={reason}" if reason else ""
     return {
         "last_result": None,
-        "last_failure": "the pending action was rejected",
+        "last_failure": "the pending action was rejected by the operator",
         "last_failure_transient": False,
+        "status": "failed",
+        "final_answer": "The requested action was rejected and was not executed.",
         "trace": [
             *state["trace"],
             new_trace_event(
                 state,
                 node="approval_gate",
-                detail=f"step={state['step_index']} tool={step.name} REJECTED",
+                detail=(f"step={state['step_index']} tool={step.name} REJECTED{reason_suffix}"),
                 level="error",
             ),
         ],
     }
 
 
+def route_after_approval(state: GraphState) -> str:
+    """A human rejection is terminal; approval/non-protected steps continue."""
+    return END if state["status"] == "failed" else "tool_call"
+
+
 def make_tool_call_node(
     tools: dict[str, Tool], on_irreversible_tool_attempt: Callable[[], None] | None = None
 ) -> Callable[[GraphState], dict]:
     def tool_call_node(state: GraphState) -> dict:
-        if state["last_failure"] is not None:
-            # approval_gate already recorded a rejection for this step —
-            # nothing to run, pass the failure through untouched so
-            # decide_next handles it exactly like any other permanent
-            # step failure.
-            return {}
-
         step = state["plan"][state["step_index"]]
         tool_calls_made = state["tool_calls_made"] + 1
         tool = tools.get(step.name)
@@ -439,7 +452,13 @@ def route_after_decide(state: GraphState) -> str:
 def make_finalize_node(llm: LLMProvider) -> Callable[[GraphState], dict]:
     def finalize_node(state: GraphState) -> dict:
         prompt = HumanMessage(
-            content="Summarize the results above into a final answer for the user."
+            content=(
+                "Summarize the results above into a final answer for the user. "
+                "Cite every web-derived claim with the exact result URL. If an "
+                "official-domain search returned no compliant results, say that "
+                "official evidence could not be found and do not substitute an "
+                "unrequested third-party source."
+            )
         )
         response = llm.generate([*state["messages"], prompt], tools=None)
         return {

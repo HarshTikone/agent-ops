@@ -177,4 +177,16 @@ describe('ApprovalModal', () => {
     expect(opener).toHaveFocus()
     appShell.remove()
   })
+
+  it('clears the reason and refocuses when a new pending action replaces the old one', async () => {
+    const user = userEvent.setup()
+    const props = { onApprove: vi.fn(), onReject: vi.fn(), submission: null, error: null }
+    const rendered = render(<ApprovalModal pendingAction={makePendingAction()} {...props} />)
+    await user.type(screen.getByLabelText(/reason/i), 'old reason')
+
+    rendered.rerender(<ApprovalModal pendingAction={makePendingAction({ id: 'p2' })} {...props} />)
+
+    expect(screen.getByLabelText(/reason/i)).toHaveValue('')
+    expect(screen.getByRole('heading', { name: 'Approval needed' })).toHaveFocus()
+  })
 })

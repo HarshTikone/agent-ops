@@ -2,6 +2,8 @@
 test suite (live verification is done manually, once, outside pytest; see
 ADR-011)."""
 
+import json
+
 import httpx
 import pytest
 
@@ -50,6 +52,17 @@ def test_query_schema_rejects_whitespace_only_input() -> None:
         WebSearchTool(api_key="test-key").invoke({"query": "   "})
 
 
+@pytest.mark.parametrize(
+    "domain",
+    ["https://render.com/docs", "render.com/path", "user@render.com", "localhost", "rénder.com"],
+)
+def test_domain_schema_rejects_non_hostname_values(domain: str) -> None:
+    with pytest.raises(ValueError, match="plain hostnames"):
+        WebSearchTool(api_key="test-key").invoke(
+            {"query": "render cold starts", "include_domains": [domain]}
+        )
+
+
 def test_successful_search_formats_results() -> None:
     tool = _tool_with_response(
         200,
@@ -71,6 +84,61 @@ def test_successful_search_formats_results() -> None:
 def test_no_results_is_not_an_error() -> None:
     tool = _tool_with_response(200, {"results": []})
     assert tool.run(query="query with no hits") == "No results found."
+
+
+def test_official_domain_filter_is_sent_and_off_domain_results_are_removed() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["include_domains"] == ["render.com"]
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "title": "Official",
+                        "url": "https://render.com/docs/free",
+                        "content": "official content",
+                    },
+                    {
+                        "title": "Third party",
+                        "url": "https://example.com/render",
+                        "content": "unverified content",
+                    },
+                ]
+            },
+        )
+
+    tool = WebSearchTool(api_key="test-key", client=httpx.Client(transport=_FakeTransport(handler)))
+    result = tool.invoke({"query": "Render free cold starts", "include_domains": [" Render.com. "]})
+    assert "render.com/docs/free" in result
+    assert "example.com" not in result
+
+
+def test_domain_filtered_search_reports_no_compliant_results() -> None:
+    tool = _tool_with_response(
+        200,
+        {"results": [{"title": "Third party", "url": "https://example.com", "content": "nope"}]},
+    )
+    assert (
+        tool.run(query="official docs", include_domains=["render.com"])
+        == "No results found from the requested official domains."
+    )
+
+
+def test_domain_filter_allows_subdomains_of_the_requested_official_domain() -> None:
+    tool = _tool_with_response(
+        200,
+        {
+            "results": [
+                {
+                    "title": "Official docs",
+                    "url": "https://docs.render.com/free",
+                    "content": "official",
+                }
+            ]
+        },
+    )
+    assert "docs.render.com" in tool.run(query="docs", include_domains=["render.com"])
 
 
 def test_timeout_is_a_transient_tool_error() -> None:

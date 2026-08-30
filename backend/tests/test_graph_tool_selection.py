@@ -80,6 +80,8 @@ def test_planner_selected_tool_is_the_one_actually_invoked(
         if other_name != selected_tool:
             assert other_tool.calls == [], f"{other_name} should not have been invoked"
     assert result["status"] == "done"
+    final_prompt = llm.calls[-1]["messages"][-1].content
+    assert "Cite every web-derived claim with the exact result URL" in final_prompt
 
 
 def test_planner_needing_no_tool_finishes_without_calling_any_tool() -> None:
@@ -95,6 +97,7 @@ def test_planner_needing_no_tool_finishes_without_calling_any_tool() -> None:
     assert result["status"] == "done"
     assert result["final_answer"] == "just an answer, no tool needed"
     assert len(llm.calls) == 1  # no finalize call needed — planner's own answer is final
+    assert "include_domains" in llm.calls[0]["messages"][0].content
 
 
 def test_multi_step_plan_invokes_each_tool_in_order() -> None:

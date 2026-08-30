@@ -31,7 +31,7 @@ describe('BackendStatus', () => {
       }),
     })
     render(<BackendStatus />)
-    const statusText = await screen.findByText(/Backend status: ready/)
+    const statusText = await screen.findByText(/Backend configuration: ready/)
     expect(statusText).toHaveClass('text-[var(--color-success)]')
     expect(screen.queryByRole('list')).not.toBeInTheDocument()
   })
@@ -53,7 +53,7 @@ describe('BackendStatus', () => {
       }),
     })
     render(<BackendStatus />)
-    const statusText = await screen.findByText(/Backend status: degraded/)
+    const statusText = await screen.findByText(/Backend configuration: degraded/)
     expect(statusText).toHaveClass('text-[var(--color-warning)]')
     const missingList = screen.getByText('OpenRouter API key missing')
     expect(missingList).toBeInTheDocument()
@@ -74,7 +74,7 @@ describe('BackendStatus', () => {
       }),
     })
     render(<BackendStatus />)
-    const statusText = await screen.findByText(/Backend status: not_ready/)
+    const statusText = await screen.findByText(/Backend configuration: not_ready/)
     expect(statusText).toHaveClass('text-[var(--color-danger)]')
     const missingItem = screen.getByText('OpenRouter API key missing')
     expect(missingItem).toBeInTheDocument()
@@ -88,14 +88,14 @@ describe('BackendStatus', () => {
   it('shows an error state — the shown failure mode — when the backend is unreachable', async () => {
     ;(fetch as ReturnType<typeof vi.fn>).mockRejectedValue(new TypeError('Failed to fetch'))
     render(<BackendStatus />)
-    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument(), { timeout: 3_500 })
     expect(screen.getByRole('alert')).toHaveTextContent('Backend unreachable')
   })
 
   it('surfaces a non-2xx response as the same error state', async () => {
     ;(fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 503 })
     render(<BackendStatus />)
-    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument(), { timeout: 3_500 })
     expect(screen.getByRole('alert')).toHaveTextContent('status 503')
   })
 })

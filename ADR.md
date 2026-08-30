@@ -1117,10 +1117,9 @@ actions).
 `approval_gate_node` is a no-op pass-through for every step except one that
 needs approval (ADR-016); for those, it calls `interrupt({"tool_name":...,
 "tool_args":..., "step_id":...})` and, on resume, either lets execution
-continue (approved) or sets `last_failure`/`last_failure_transient=False`
-(rejected) so `decide_next` (ADR-012) routes a rejection through the exact
-same re-plan-or-give-up path as any other permanent step failure — no
-separate "what happens after a rejection" logic needed.
+continue (approved) or terminates the graph (rejected). The original
+replan-on-rejection behavior was superseded by ADR-025 after production QA
+showed that a planner could propose the same protected mutation again.
 
 This is a separate node rather than a check inside `tool_call_node`
 specifically because of how LangGraph resumes: a node's *entire function
@@ -1625,3 +1624,35 @@ of ADR-019.
   retained rather than rewritten.
 - LangGraph checkpoints and application trace rows remain separate commits, as
   already accepted in ADR-020.
+
+---
+
+## ADR-025: Human rejection is terminal and provider validity is release-gated
+
+**Date:** 2026-08-29 (production QA remediation)
+
+**Context**
+
+Public QA found two misleading behaviors. A rejected protected write was
+treated like a permanent tool failure, so bounded replanning requested the
+same write again with altered content. Separately, readiness correctly proved
+that provider keys were present but was interpreted as proof those keys were
+valid; an invalid Gemini credential therefore surfaced only on the first run.
+
+**Decision**
+
+A human rejection is a terminal security decision. The graph records one
+rejection trace, executes no tool, performs no replan, and persists the
+session as failed. Readiness remains a cheap configuration/database check;
+credential validity is actively tested by `python -m scripts.release_check`
+before a release is promoted. Official-source searches carry an explicit
+domain allowlist and discard off-domain results.
+
+**What we gave up**
+
+- A rejected run cannot automatically find a non-mutating alternative; the
+  user starts a new session if they want a different approach.
+- Provider validity can change after deployment without changing readiness;
+  operations must rerun the release check after rotating provider credentials.
+- Strict official-domain searches can return no answer rather than silently
+  falling back to convenient third-party material.

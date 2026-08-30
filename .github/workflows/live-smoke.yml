@@ -27,5 +27,7 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - name: Apply migrations
         run: python -m scripts.migrate
+      - name: Verify release dependencies
+        run: python -m scripts.release_check
       - name: Run opt-in live tests
         run: pytest -m live -o addopts="" -v

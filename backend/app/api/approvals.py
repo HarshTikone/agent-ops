@@ -73,6 +73,7 @@ def _decide(
             llm,
             session_id=decided["session_id"],
             approved=approve,
+            rejection_reason=reason,
             tavily_api_key=settings.tavily_api_key,
             pending_action_id=pending_action_id,
             http_client=http_client,

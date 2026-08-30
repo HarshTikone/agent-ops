@@ -35,30 +35,44 @@ function persistHiddenSessionIds(ids: Set<string>): void {
 export function SessionListPage() {
   const [load, setLoad] = useState<LoadState>({ state: 'loading' })
   const [creating, setCreating] = useState(false)
+  const [creatingSlow, setCreatingSlow] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
+  const [coldStart, setColdStart] = useState(false)
+  const [loadVersion, setLoadVersion] = useState(0)
   const [hiddenSessionIds, setHiddenSessionIds] = useState(readHiddenSessionIds)
   const [hiddenNotice, setHiddenNotice] = useState<Session | null>(null)
   const navigate = useNavigate()
 
   useEffect(() => {
     const controller = new AbortController()
+    const timer = window.setTimeout(() => setColdStart(true), 8_000)
     listSessions(controller.signal)
       .then((sessions) => setLoad({ state: 'loaded', sessions }))
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === 'AbortError') return
         setLoad({ state: 'error', message: err instanceof Error ? err.message : 'Unknown error' })
       })
-    return () => controller.abort()
-  }, [])
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+    }
+  }, [loadVersion])
 
   const handleNewSession = () => {
     setCreating(true)
+    setCreatingSlow(false)
     setCreateError(null)
+    const slowTimer = window.setTimeout(() => setCreatingSlow(true), 10_000)
     createSession()
-      .then((session) => navigate(`/sessions/${session.id}`))
+      .then((session) => {
+        window.clearTimeout(slowTimer)
+        navigate(`/sessions/${session.id}`)
+      })
       .catch((err: unknown) => {
+        window.clearTimeout(slowTimer)
         setCreateError(err instanceof Error ? err.message : 'Unknown error')
         setCreating(false)
+        setCreatingSlow(false)
       })
   }
 
@@ -120,16 +134,36 @@ export function SessionListPage() {
         </p>
       )}
 
-      {load.state === 'loading' && (
-        <p role="status" className="text-muted text-sm">
-          Loading sessions…
+      {creatingSlow && (
+        <p role="status" className="mb-[var(--space-4)] text-sm text-[var(--color-warning)]">
+          Still creating the session. Do not retry yet; the server may still complete it.
         </p>
       )}
 
+      {load.state === 'loading' && (
+        <div role="status" className="text-muted text-sm">
+          <p>Loading sessions…</p>
+          {coldStart && (
+            <p className="mt-2">The free backend may need about a minute to wake up.</p>
+          )}
+        </div>
+      )}
+
       {load.state === 'error' && (
-        <p role="alert" className="text-sm text-[var(--color-danger)]">
-          Could not load sessions: {load.message}
-        </p>
+        <div role="alert" className="text-sm text-[var(--color-danger)]">
+          <p>Could not load sessions: {load.message}</p>
+          <button
+            type="button"
+            onClick={() => {
+              setLoad({ state: 'loading' })
+              setColdStart(false)
+              setLoadVersion((version) => version + 1)
+            }}
+            className="btn btn-secondary mt-3"
+          >
+            Retry
+          </button>
+        </div>
       )}
 
       {hiddenSessionIds.size > 0 && (

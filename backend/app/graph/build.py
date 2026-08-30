@@ -27,6 +27,7 @@ from app.graph.nodes import (
     make_planner_node,
     make_tool_call_node,
     observe_node,
+    route_after_approval,
     route_after_decide,
     route_after_planner,
 )
@@ -61,7 +62,9 @@ def build_graph(
     graph.add_edge(START, "planner")
     graph.add_conditional_edges("planner", route_after_planner, {"delegate": "delegate", END: END})
     graph.add_edge("delegate", "approval_gate")
-    graph.add_edge("approval_gate", "tool_call")
+    graph.add_conditional_edges(
+        "approval_gate", route_after_approval, {"tool_call": "tool_call", END: END}
+    )
     graph.add_edge("tool_call", "observe")
     graph.add_edge("observe", "decide_next")
     # route_after_decide already translates next_action -> the actual next

@@ -26,9 +26,12 @@ const readinessLabels: Record<keyof ReadinessResponse['checks'], string> = {
  */
 export function BackendStatus() {
   const [status, setStatus] = useState<Status>({ state: 'loading' })
+  const [attempt, setAttempt] = useState(0)
+  const [coldStart, setColdStart] = useState(false)
 
   useEffect(() => {
     const controller = new AbortController()
+    const timer = window.setTimeout(() => setColdStart(true), 8_000)
     fetchReadiness(controller.signal)
       .then((data) => setStatus({ state: 'loaded', data }))
       .catch((err: unknown) => {
@@ -36,22 +39,37 @@ export function BackendStatus() {
         const message = err instanceof Error ? err.message : 'Unknown error'
         setStatus({ state: 'error', message })
       })
-    return () => controller.abort()
-  }, [])
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+    }
+  }, [attempt])
 
   if (status.state === 'loading') {
     return (
-      <p role="status" className="text-muted text-sm">
-        Checking backend connection…
-      </p>
+      <div role="status" className="text-muted text-sm">
+        <p>Checking backend connection…</p>
+        {coldStart && <p className="mt-1">The free backend may need about a minute to wake up.</p>}
+      </div>
     )
   }
 
   if (status.state === 'error') {
     return (
-      <p role="alert" className="text-sm text-[var(--color-danger)]">
-        Backend unreachable: {status.message}
-      </p>
+      <div role="alert" className="text-sm text-[var(--color-danger)]">
+        <p>Backend unreachable: {status.message}</p>
+        <button
+          type="button"
+          onClick={() => {
+            setStatus({ state: 'loading' })
+            setColdStart(false)
+            setAttempt((value) => value + 1)
+          }}
+          className="btn btn-secondary mt-2 px-3 py-1 text-xs"
+        >
+          Retry connection
+        </button>
+      </div>
     )
   }
 
@@ -69,7 +87,10 @@ export function BackendStatus() {
 
   return (
     <div className="text-sm">
-      <p className={statusColor[status.data.status]}>Backend status: {status.data.status}</p>
+      <p className={statusColor[status.data.status]}>Backend configuration: {status.data.status}</p>
+      <p className="text-muted mt-1 text-xs">
+        Provider keys are checked for configuration here and verified by the release smoke test.
+      </p>
       {notConfigured.length > 0 && (
         <ul className={`mt-1 list-disc pl-5 ${statusColor[status.data.status]}`}>
           {notConfigured.map(([key]) => (

@@ -135,6 +135,7 @@ def resume_session_run(
     *,
     session_id: UUID,
     approved: bool,
+    rejection_reason: str | None = None,
     tavily_api_key: str,
     pending_action_id: UUID | None = None,
     http_client: httpx.Client | None = None,
@@ -157,6 +158,9 @@ def resume_session_run(
     )
     result = cast(
         dict[str, Any],
-        graph.invoke(Command[Any](resume=approved), config=_thread_config(session_id)),
+        graph.invoke(
+            Command[Any](resume={"approved": approved, "reason": rejection_reason}),
+            config=_thread_config(session_id),
+        ),
     )
     _apply_result(pool, session_id, result)

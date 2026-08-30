@@ -6,6 +6,8 @@ import { SessionPage } from './SessionPage'
 import * as api from '../lib/api'
 import type { Session, TraceEvent } from '../lib/api'
 
+const SESSION_ID = '91255bea-f210-48b0-a3df-8dea7938d645'
+
 vi.mock('../lib/api', async () => {
   const actual = await vi.importActual<typeof api>('../lib/api')
   return {
@@ -20,7 +22,7 @@ vi.mock('../lib/api', async () => {
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
-    id: 's1',
+    id: SESSION_ID,
     task: '',
     status: 'created',
     final_answer: null,
@@ -31,7 +33,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
   }
 }
 
-function renderPage(entry = '/sessions/s1') {
+function renderPage(entry = `/sessions/${SESSION_ID}`) {
   return render(
     <MemoryRouter initialEntries={[entry]}>
       <Routes>
@@ -70,7 +72,7 @@ describe('SessionPage', () => {
     vi.mocked(api.getTrace).mockResolvedValue([
       {
         id: 1,
-        session_id: 's1',
+        session_id: SESSION_ID,
         sequence: 1,
         node: 'planner',
         detail: 'planned',
@@ -96,13 +98,13 @@ describe('SessionPage', () => {
 
     const input = await screen.findByLabelText(/what should the agent do/i)
     await user.type(input, 'what is 2+2?')
-    // second getSession call, used by the post-action refetch
-    vi.mocked(api.getSession).mockResolvedValueOnce(
-      makeSession({ status: 'done', task: 'what is 2+2?', final_answer: 'it is 4' }),
-    )
     await user.click(screen.getByRole('button', { name: 'Send' }))
 
-    expect(api.sendMessage).toHaveBeenCalledWith('s1', 'what is 2+2?', expect.any(AbortSignal))
+    expect(api.sendMessage).toHaveBeenCalledWith(
+      SESSION_ID,
+      'what is 2+2?',
+      expect.any(AbortSignal),
+    )
     expect(await screen.findByText('it is 4')).toBeInTheDocument()
   })
 
@@ -110,7 +112,7 @@ describe('SessionPage', () => {
     const user = userEvent.setup()
     const pending = {
       id: 'p1',
-      session_id: 's1',
+      session_id: SESSION_ID,
       tool_name: 'notes_store',
       tool_args: { action: 'write', key: 'k', content: 'v' },
       status: 'pending' as const,
@@ -129,9 +131,6 @@ describe('SessionPage', () => {
 
     expect(await screen.findByRole('dialog')).toBeInTheDocument()
 
-    vi.mocked(api.getSession).mockResolvedValueOnce(
-      makeSession({ status: 'done', task: 'save a note', final_answer: 'saved' }),
-    )
     await user.click(screen.getByRole('button', { name: 'Approve' }))
 
     expect(api.approvePendingAction).toHaveBeenCalledWith('p1', expect.any(AbortSignal))
@@ -143,7 +142,7 @@ describe('SessionPage', () => {
     const user = userEvent.setup()
     const pending = {
       id: 'p1',
-      session_id: 's1',
+      session_id: SESSION_ID,
       tool_name: 'notes_store',
       tool_args: { action: 'write' },
       status: 'pending' as const,
@@ -156,16 +155,13 @@ describe('SessionPage', () => {
     )
     vi.mocked(api.getTrace).mockResolvedValue([])
     vi.mocked(api.rejectPendingAction).mockResolvedValue(
-      makeSession({ status: 'done', task: 'save a note', final_answer: 'not saved' }),
+      makeSession({ status: 'failed', task: 'save a note', final_answer: 'not saved' }),
     )
     renderPage()
 
     await screen.findByRole('dialog')
     await user.type(screen.getByLabelText(/reason/i), 'not needed')
 
-    vi.mocked(api.getSession).mockResolvedValueOnce(
-      makeSession({ status: 'done', task: 'save a note', final_answer: 'not saved' }),
-    )
     await user.click(screen.getByRole('button', { name: 'Reject' }))
 
     expect(api.rejectPendingAction).toHaveBeenCalledWith(
@@ -180,7 +176,7 @@ describe('SessionPage', () => {
     const user = userEvent.setup()
     const pending = {
       id: 'p1',
-      session_id: 's1',
+      session_id: SESSION_ID,
       tool_name: 'notes_store',
       tool_args: { action: 'write' },
       status: 'pending' as const,
@@ -221,5 +217,43 @@ describe('SessionPage', () => {
 
     rendered.unmount()
     expect(actionSignal?.aborted).toBe(true)
+  })
+
+  it('rejects an invalid session id locally without issuing reads', () => {
+    renderPage('/sessions/not-a-uuid')
+    expect(screen.getByRole('heading', { name: 'Invalid session link' })).toBeInTheDocument()
+    expect(api.getSession).not.toHaveBeenCalled()
+    expect(api.getTrace).not.toHaveBeenCalled()
+  })
+
+  it('keeps a successful decision closed when the trace refresh fails', async () => {
+    const user = userEvent.setup()
+    const pending = {
+      id: 'p1',
+      session_id: SESSION_ID,
+      tool_name: 'notes_store',
+      tool_args: { action: 'write' },
+      status: 'pending' as const,
+      reason: null,
+      created_at: '2026-08-24T00:00:00Z',
+      decided_at: null,
+    }
+    vi.mocked(api.getSession).mockResolvedValueOnce(
+      makeSession({ status: 'awaiting_approval', task: 'save', pending_action: pending }),
+    )
+    vi.mocked(api.getTrace)
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('trace unavailable'))
+    vi.mocked(api.approvePendingAction).mockResolvedValue(
+      makeSession({ status: 'done', task: 'save', final_answer: 'saved' }),
+    )
+    renderPage()
+
+    await screen.findByRole('dialog')
+    await user.click(screen.getByRole('button', { name: 'Approve' }))
+
+    expect(await screen.findByText('saved')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('trace unavailable')
   })
 })

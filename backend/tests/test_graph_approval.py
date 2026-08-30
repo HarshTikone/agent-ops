@@ -113,7 +113,7 @@ def test_approval_resumes_and_runs_the_tool() -> None:
     assert result["final_answer"] == "saved it"
 
 
-def test_rejection_never_runs_the_tool_and_replans() -> None:
+def test_rejection_is_terminal_and_never_runs_or_replans() -> None:
     tools = _tools()
     checkpointer = InMemorySaver(serde=GRAPH_SERDE)
     llm = _ScriptedLLM(
@@ -129,20 +129,24 @@ def test_rejection_never_runs_the_tool_and_replans() -> None:
                 ],
                 provider="gemini",
             ),
-            # the re-plan after rejection
-            LLMResponse(content="okay, I won't save it", tool_calls=[], provider="gemini"),
         ]
     )
     graph = build_graph(llm, tools, langchain_tools=[], checkpointer=checkpointer)
     config = {"configurable": {"thread_id": "t3"}}
 
     graph.invoke(initial_state("save a note"), config=config)
-    result = graph.invoke(Command(resume=False), config=config)
+    result = graph.invoke(
+        Command(resume={"approved": False, "reason": "not authorized"}), config=config
+    )
 
     assert tools["notes_store"].calls == []  # rejected — never ran
-    assert result["replans"] == 1
-    assert result["status"] == "done"
-    assert result["final_answer"] == "okay, I won't save it"
+    assert len(llm.calls) == 1
+    assert result["replans"] == 0
+    assert result["status"] == "failed"
+    assert result["final_answer"] == "The requested action was rejected and was not executed."
+    assert result["trace"][-1]["node"] == "approval_gate"
+    assert "REJECTED" in result["trace"][-1]["detail"]
+    assert "not authorized" in result["trace"][-1]["detail"]
 
 
 def test_read_and_list_actions_never_pause() -> None:

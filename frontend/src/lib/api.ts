@@ -9,6 +9,13 @@ if (import.meta.env.PROD && !configuredApiUrl) {
 }
 export const API_BASE_URL = configuredApiUrl?.replace(/\/$/, '') ?? 'http://localhost:8000'
 const OPERATOR_KEY_STORAGE = 'agent-ops.operator-key'
+export const MIN_OPERATOR_KEY_BYTES = 32
+const READ_TIMEOUT_MS = 30_000
+const READ_RETRY_DELAY_MS = 2_000
+
+export function operatorKeyByteLength(key: string): number {
+  return new TextEncoder().encode(key.trim()).byteLength
+}
 
 export function getOperatorKey(): string {
   try {
@@ -20,21 +27,23 @@ export function getOperatorKey(): string {
   }
 }
 
-export function setOperatorKey(key: string): void {
+export function setOperatorKey(key: string): boolean {
   const normalized = key.trim()
   try {
     if (normalized) sessionStorage.setItem(OPERATOR_KEY_STORAGE, normalized)
     else sessionStorage.removeItem(OPERATOR_KEY_STORAGE)
+    return getOperatorKey() === normalized
   } catch {
-    // The mutation request will still fail closed without a readable key.
+    return false
   }
 }
 
-export function clearOperatorKey(): void {
+export function clearOperatorKey(): boolean {
   try {
     sessionStorage.removeItem(OPERATOR_KEY_STORAGE)
+    return getOperatorKey() === ''
   } catch {
-    // Clearing an unavailable store is already the desired end state.
+    return false
   }
 }
 
@@ -69,15 +78,69 @@ export class ApiError extends Error {
   }
 }
 
-export async function fetchReadiness(signal?: AbortSignal): Promise<ReadinessResponse> {
-  const response = await fetch(`${API_BASE_URL}/health/ready`, { signal })
-  if (!response.ok) {
-    throw new ApiError(
-      `Backend readiness check failed with status ${response.status}`,
-      response.status,
-    )
+function abortError(): DOMException {
+  return new DOMException('The request was aborted.', 'AbortError')
+}
+
+function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError())
+      return
+    }
+    const handleAbort = () => {
+      window.clearTimeout(timer)
+      reject(abortError())
+    }
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener('abort', handleAbort)
+      resolve()
+    }, milliseconds)
+    signal?.addEventListener('abort', handleAbort, { once: true })
+  })
+}
+
+async function fetchAttempt(url: string, init: RequestInit, timeout: boolean): Promise<Response> {
+  if (!timeout) return fetch(url, init)
+
+  if (init.signal?.aborted) throw abortError()
+  const controller = new AbortController()
+  let timedOut = false
+  const parentSignal = init.signal
+  const forwardAbort = () => controller.abort(parentSignal?.reason)
+  parentSignal?.addEventListener('abort', forwardAbort, { once: true })
+  const timer = window.setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, READ_TIMEOUT_MS)
+  try {
+    return await fetch(url, { ...init, signal: controller.signal })
+  } catch (error) {
+    if (timedOut) throw new ApiError('Backend read timed out while the service was waking up.', 408)
+    throw error
+  } finally {
+    window.clearTimeout(timer)
+    parentSignal?.removeEventListener('abort', forwardAbort)
   }
-  return response.json() as Promise<ReadinessResponse>
+}
+
+function detailMessage(body: unknown): string | null {
+  if (!body || typeof body !== 'object' || !('detail' in body)) return null
+  if (typeof body.detail === 'string') return body.detail
+  if (!Array.isArray(body.detail)) return null
+  const messages = body.detail
+    .map((item: unknown) => {
+      if (!item || typeof item !== 'object' || !('msg' in item) || typeof item.msg !== 'string') {
+        return null
+      }
+      return item.msg
+    })
+    .filter((message): message is string => Boolean(message))
+  return messages.length > 0 ? `Invalid request: ${messages.join('; ')}` : null
+}
+
+export async function fetchReadiness(signal?: AbortSignal): Promise<ReadinessResponse> {
+  return request<ReadinessResponse>('/health/ready', { signal })
 }
 
 // --- Sessions / messages / trace / approvals (Day 3 backend, Day 4 UI) ----
@@ -142,25 +205,42 @@ async function request<T>(path: string, init?: RequestInit & { signal?: AbortSig
     if (!operatorKey) {
       throw new ApiError('Enter the operator key before making changes.', 401)
     }
+    if (operatorKeyByteLength(operatorKey) < MIN_OPERATOR_KEY_BYTES) {
+      throw new ApiError('The operator key must contain at least 32 bytes.', 401)
+    }
     headers.set('X-Agent-Ops-Key', operatorKey)
   }
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-    headers,
-  })
+  const requestInit = { ...init, headers }
+  const mayRetry = method === 'GET' || method === 'HEAD'
+  let response: Response | undefined
+  let lastError: unknown
+  const attempts = mayRetry ? 2 : 1
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      response = await fetchAttempt(`${API_BASE_URL}${path}`, requestInit, mayRetry)
+      if (response.ok || response.status < 500 || attempt === attempts - 1) break
+    } catch (error) {
+      lastError = error
+      if (init?.signal?.aborted || attempt === attempts - 1) throw error
+    }
+    await wait(READ_RETRY_DELAY_MS, init?.signal)
+  }
+  if (!response) throw lastError
   if (!response.ok) {
     let detail = `request to ${path} failed with status ${response.status}`
     try {
       const body: unknown = await response.json()
-      if (body && typeof body === 'object' && 'detail' in body && typeof body.detail === 'string') {
-        detail = body.detail
-      }
+      detail = detailMessage(body) ?? detail
     } catch {
       // response wasn't JSON — fall back to the generic message above
     }
     throw new ApiError(detail, response.status)
   }
   return response.json() as Promise<T>
+}
+
+export function isValidSessionId(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
 }
 
 export function createSession(signal?: AbortSignal): Promise<Session> {

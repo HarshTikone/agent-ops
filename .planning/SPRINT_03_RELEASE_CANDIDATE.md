@@ -1,9 +1,9 @@
 # Sprint 03 — Release Candidate and Public Demo
 
-> **Status: complete (2026-08-29).** The release candidate is deployed, the
-> production schema is current, all local gates pass, and the public approval
-> and rejection workflows have been exercised through persisted terminal
-> states. Sanitized screenshots were captured in the release task output.
+> **Status: QA remediation locally verified; public redeployment pending (2026-08-29).** Public testing found
+> rejection-replan, source-integrity, readiness-meaning, and cold-start UX
+> defects. Fixes are implemented locally; the release returns to complete only
+> after the full local matrix and a new public deployment pass.
 
 ## Goal and constraints
 
@@ -69,12 +69,14 @@ domain work is included.
 2. Build `agent-ops-backend:release` from `backend/Dockerfile`.
 3. Run `python -m scripts.migrate` from that image against the production
    `DATABASE_URL`; retain sanitized output as evidence.
-4. Create/update Render from `render.yaml`, populate dashboard-only variables,
+4. Run `python -m scripts.release_check` from the same image and environment;
+   retain only its pass/fail lines as evidence.
+5. Create/update Render from `render.yaml`, populate dashboard-only variables,
    and wait for `/health` to pass.
-5. Create/update the Vercel project with Root Directory `frontend`, set
+6. Create/update the Vercel project with Root Directory `frontend`, set
    `VITE_API_URL` to Render's HTTPS origin, and deploy.
-6. Set Render `CORS_ORIGINS` to Vercel's exact production origin and redeploy.
-7. Run health, readiness, security, approval, rejection, persistence, and trace
+7. Set Render `CORS_ORIGINS` to Vercel's exact production origin and redeploy.
+8. Run health, readiness, security, approval, rejection, persistence, and trace
    acceptance checks. Record only non-secret results above.
 
 ## Rollback and operational notes
@@ -115,6 +117,10 @@ domain work is included.
 | Public redesigned UI smoke | Passed | Readiness displayed as ready; session list, detail, and trace empty state loaded through Vercel |
 | Redesigned frontend E2E | Passed | Approval session `c1681a91-2be2-48e2-8a25-11ec287265ea` reached Done with an APPROVED write trace; rejection session `aba89b01-74f1-4c93-96f1-6ae7874a46f7` recorded two REJECTED decisions, no successful tool call, and a persisted Failed terminal state. Sanitized screenshots were captured. |
 | Final unauthenticated mutation check | Passed | After clearing the session-stored operator key, New session was blocked with the expected credential alert and created no session. |
+| Final backend remediation matrix | Passed | Ruff and Black clean; mypy clean across 35 application files; 172 tests passed with 95.27% coverage; 1 opt-in live test deselected. |
+| Final frontend remediation matrix | Passed | ESLint and Prettier clean; 95 tests passed; coverage 87.50% statements / 81.81% branches / 87.23% functions / 92.72% lines; TypeScript and Vite production build passed. |
+| Production URL build gate | Passed | An explicit validation URL produced the deployable bundle; an all-whitespace `VITE_API_URL` made the production build exit 1 with the required configuration error. |
+| Remediation release image | Passed | Docker image rebuilt from the final backend; active Gemini, OpenRouter, Tavily, Supabase, and database checks all passed with outcome-only logs. |
 
 ## Production QA review — 2026-08-29
 
@@ -143,3 +149,15 @@ Supabase production database.
 | Existing production session | Resolved | A conditional one-row recovery marked session `AA4F` failed only because it was still running and more than one hour stale; no data was deleted. |
 | Approval and rejection acceptance | Pass | With the dashboard-configured operator key saved only in session storage, approval session `…65ea` completed its protected note write and persisted after refresh. Rejection session `…46f7` rejected the original action and its single bounded replan, executed no write, exhausted the replan budget, and persisted after refresh. Escape did not dismiss the blocking dialog and initial focus landed on its heading. The key was cleared after verification. |
 | Provider configuration recovery | Pass | The first live run exposed an invalid Render `GEMINI_API_KEY` despite presence-only readiness reporting. The dashboard value was replaced without disclosure, Render redeployed, and fresh Gemini planning/finalization calls then succeeded. |
+
+## Final QA remediation — 2026-08-29
+
+| Finding | Local resolution | Public gate |
+|---|---|---|
+| Rejection prompted for a second protected write | Rejection now exits the graph as one persisted terminal decision with no replan or tool call. | Reject one write and confirm exactly one rejection trace after refresh. |
+| Approval dialog retained the prior reason/focus | Dialog state and focus are scoped to `pending_action.id`; successful decision responses immediately replace stale state. | Exercise consecutive approvals and inspect focus/reason state. |
+| Official-source request returned a third-party article | Web search supports a strict domain allowlist, filters returned URLs, and finalization requires citations. | Request official Render evidence and confirm only `render.com` URLs. |
+| Presence-only readiness hid an invalid provider key | Readiness is explicitly labeled configuration-only; a secret-safe active release command is required before promotion. | Run the release command with the production image/environment. |
+| Cold starts and failed post-decision reads produced confusing UI | Reads have bounded retry/cold-start recovery; mutations never retry; trace failures cannot resurrect a decided modal. | Wake a cold service and simulate trace-refresh failure. |
+| Proxy IP collapsed production rate-limit identity | Uvicorn now trusts Render forwarding headers at the container boundary. | Verify two forwarded client identities have independent mutation budgets. |
+| Short or unstorable operator keys looked configured | Production requires 32 UTF-8 bytes and the UI reports validation/storage failures. | Confirm short key is rejected without a network request. |

@@ -62,8 +62,10 @@ def _wire_application_resources(db_pool):
 class _ScriptedLLM:
     def __init__(self, responses: list[LLMResponse]) -> None:
         self._responses = list(responses)
+        self.calls = 0
 
     def generate(self, messages, tools=None) -> LLMResponse:
+        self.calls += 1
         if not self._responses:
             raise AssertionError("llm.generate() called more times than scripted")
         return self._responses.pop(0)
@@ -257,6 +259,43 @@ def _approval_provider(*, key: str = "k", content: str = "v") -> _ScriptedLLM:
             LLMResponse(content="saved", tool_calls=[], provider="test"),
         ]
     )
+
+
+def test_rejection_is_terminal_through_the_api(db_pool) -> None:
+    from app.dependencies import get_llm_provider
+
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["id"]
+    provider = _approval_provider(key="rejected-key", content="must-not-write")
+    app.dependency_overrides[get_llm_provider] = lambda: provider
+    try:
+        sent = client.post(
+            f"/sessions/{session_id}/messages",
+            json={"content": "Save a protected note."},
+        )
+        pending_action_id = sent.json()["pending_action"]["id"]
+
+        rejected = client.post(
+            f"/approvals/{pending_action_id}/reject",
+            json={"reason": "not authorized"},
+        )
+
+        assert rejected.status_code == 200
+        assert rejected.json()["status"] == "failed"
+        assert rejected.json()["pending_action"] is None
+        assert provider.calls == 1
+        assert repo.read_note(db_pool, session_id, key="rejected-key") is None
+        trace = repo.list_trace_events(db_pool, session_id)
+        rejection_events = [event for event in trace if "REJECTED" in event["detail"]]
+        assert len(rejection_events) == 1
+        assert "not authorized" in rejection_events[0]["detail"]
+        assert not any(event["node"] == "tool_call" for event in trace)
+        assert not any(event["node"] == "decide_next" for event in trace)
+    finally:
+        del app.dependency_overrides[get_llm_provider]
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+        create_checkpointer(db_pool).delete_thread(str(session_id))
 
 
 def test_provider_crash_during_send_message_leaves_session_failed_not_stuck(db_pool) -> None:

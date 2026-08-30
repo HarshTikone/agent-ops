@@ -47,7 +47,9 @@ def test_cors_origin_list_single_origin():
 def test_is_production_flag():
     assert (
         Settings(
-            _env_file=None, environment="production", agent_ops_api_key="production-test-key"
+            _env_file=None,
+            environment="production",
+            agent_ops_api_key="production-test-key-at-least-32-bytes",
         ).is_production
         is True
     )
@@ -58,6 +60,24 @@ def test_production_requires_operator_key(monkeypatch):
     isolate_settings_env(monkeypatch)
     with pytest.raises(ValidationError, match="AGENT_OPS_API_KEY"):
         Settings(_env_file=None, environment="production", agent_ops_api_key="")
+
+
+def test_production_rejects_short_operator_key(monkeypatch):
+    isolate_settings_env(monkeypatch)
+    with pytest.raises(ValidationError, match="at least 32 bytes"):
+        Settings(_env_file=None, environment="production", agent_ops_api_key="too-short")
+
+
+def test_production_counts_operator_key_utf8_bytes(monkeypatch):
+    isolate_settings_env(monkeypatch)
+    settings = Settings(_env_file=None, environment="production", agent_ops_api_key="🔐" * 8)
+    assert settings.is_production is True
+
+
+def test_production_rejects_operator_key_surrounding_whitespace(monkeypatch):
+    isolate_settings_env(monkeypatch)
+    with pytest.raises(ValidationError, match="without surrounding whitespace"):
+        Settings(_env_file=None, environment="production", agent_ops_api_key=f" {'x' * 32} ")
 
 
 def test_llm_providers_configured_requires_gemini_key():

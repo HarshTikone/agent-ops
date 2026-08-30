@@ -17,10 +17,11 @@ describe('api request helper (via the session/approval functions)', () => {
   beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn())
     sessionStorage.clear()
-    setOperatorKey('test-operator-key')
+    setOperatorKey('test-operator-key-that-is-at-least-32-bytes')
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.unstubAllGlobals()
   })
 
@@ -79,7 +80,9 @@ describe('api request helper (via the session/approval functions)', () => {
     const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]!
     expect(init.method).toBe('POST')
     expect(JSON.parse(init.body)).toEqual({ content: 'what is 2+2?' })
-    expect(new Headers(init.headers).get('X-Agent-Ops-Key')).toBe('test-operator-key')
+    expect(new Headers(init.headers).get('X-Agent-Ops-Key')).toBe(
+      'test-operator-key-that-is-at-least-32-bytes',
+    )
   })
 
   it('does not expose the operator key on read requests', async () => {
@@ -96,6 +99,26 @@ describe('api request helper (via the session/approval functions)', () => {
     expect((error as ApiError).status).toBe(401)
     expect((error as ApiError).message).toContain('Enter the operator key')
     expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('rejects a mutation locally when the stored key is shorter than 32 bytes', async () => {
+    sessionStorage.setItem('agent-ops.operator-key', 'too-short')
+    const error = await createSession().catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).message).toContain('at least 32 bytes')
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('formats FastAPI validation arrays as a readable message', async () => {
+    ;(fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      status: 422,
+      json: async () => ({
+        detail: [{ loc: ['path', 'session_id'], msg: 'Input should be a UUID' }],
+      }),
+    })
+    const error = await getSession('bad').catch((e: unknown) => e)
+    expect((error as ApiError).message).toBe('Invalid request: Input should be a UUID')
   })
 
   it('approvePendingAction POSTs with no body', async () => {
@@ -123,5 +146,52 @@ describe('api request helper (via the session/approval functions)', () => {
     const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]!
     expect(url).toBe(`${API_BASE_URL}/sessions`)
     expect(init.method).toBeUndefined()
+  })
+
+  it('does not issue a read when the caller signal is already aborted', async () => {
+    const controller = new AbortController()
+    controller.abort()
+
+    await expect(listSessions(controller.signal)).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('retries an idempotent read once after a network failure', async () => {
+    vi.useFakeTimers()
+    ;(fetch as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce({ ok: true, json: async () => [] })
+
+    const result = listSessions()
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    await expect(result).resolves.toEqual([])
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('never retries a mutation after an ambiguous network failure', async () => {
+    ;(fetch as ReturnType<typeof vi.fn>).mockRejectedValue(new TypeError('connection lost'))
+    await expect(sendMessage('s1', 'do it')).rejects.toThrow('connection lost')
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('times out a read and succeeds on its single retry', async () => {
+    vi.useFakeTimers()
+    ;(fetch as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            )
+          }),
+      )
+      .mockResolvedValueOnce({ ok: true, json: async () => [] })
+
+    const result = listSessions()
+    await vi.advanceTimersByTimeAsync(32_000)
+
+    await expect(result).resolves.toEqual([])
+    expect(fetch).toHaveBeenCalledTimes(2)
   })
 })

@@ -32,7 +32,8 @@ export function ApprovalModal({
   submission: ApprovalSubmission
   error: string | null
 }) {
-  const [reason, setReason] = useState('')
+  const [reasonState, setReasonState] = useState({ actionId: pendingAction.id, value: '' })
+  const reason = reasonState.actionId === pendingAction.id ? reasonState.value : ''
   const dialogRef = useRef<HTMLDivElement>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
   const submitting = submission !== null
@@ -79,7 +80,7 @@ export function ApprovalModal({
       if (appShell) appShell.inert = wasInert
       previouslyFocused?.focus()
     }
-  }, [])
+  }, [pendingAction.id])
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[color-mix(in_srgb,var(--color-neutral-900)_50%,transparent)] p-[var(--space-4)]">
@@ -126,7 +127,9 @@ export function ApprovalModal({
           <textarea
             id="reject-reason"
             value={reason}
-            onChange={(event) => setReason(event.target.value)}
+            onChange={(event) =>
+              setReasonState({ actionId: pendingAction.id, value: event.target.value })
+            }
             disabled={submitting}
             maxLength={2_000}
             rows={2}
