@@ -77,6 +77,24 @@ describe('SessionListPage', () => {
     await user.click(screen.getByRole('button', { name: 'New session' }))
 
     expect(await screen.findByText('Session detail placeholder')).toBeInTheDocument()
+    expect(api.createSession).toHaveBeenCalledWith(expect.any(AbortSignal))
+  })
+
+  it('aborts session creation when the page unmounts', async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([])
+    let requestSignal: AbortSignal | undefined
+    vi.mocked(api.createSession).mockImplementation((signal) => {
+      requestSignal = signal
+      return new Promise(() => {})
+    })
+    const user = userEvent.setup()
+    const rendered = renderPage()
+
+    await screen.findByText(/no sessions yet/i)
+    await user.click(screen.getByRole('button', { name: 'New session' }))
+    rendered.unmount()
+
+    expect(requestSignal?.aborted).toBe(true)
   })
 
   it('shows an error and re-enables the button when session creation fails', async () => {

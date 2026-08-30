@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { createSession, listSessions, type Session } from '../lib/api'
 import { SessionList } from '../components/SessionList'
@@ -41,6 +41,8 @@ export function SessionListPage() {
   const [loadVersion, setLoadVersion] = useState(0)
   const [hiddenSessionIds, setHiddenSessionIds] = useState(readHiddenSessionIds)
   const [hiddenNotice, setHiddenNotice] = useState<Session | null>(null)
+  const activeCreate = useRef<AbortController | null>(null)
+  const createSlowTimer = useRef<number | null>(null)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -58,18 +60,34 @@ export function SessionListPage() {
     }
   }, [loadVersion])
 
+  useEffect(
+    () => () => {
+      activeCreate.current?.abort()
+      if (createSlowTimer.current !== null) window.clearTimeout(createSlowTimer.current)
+    },
+    [],
+  )
+
   const handleNewSession = () => {
     setCreating(true)
     setCreatingSlow(false)
     setCreateError(null)
-    const slowTimer = window.setTimeout(() => setCreatingSlow(true), 10_000)
-    createSession()
+    const controller = new AbortController()
+    activeCreate.current = controller
+    createSlowTimer.current = window.setTimeout(() => setCreatingSlow(true), 10_000)
+    createSession(controller.signal)
       .then((session) => {
-        window.clearTimeout(slowTimer)
+        if (controller.signal.aborted) return
+        if (createSlowTimer.current !== null) window.clearTimeout(createSlowTimer.current)
+        createSlowTimer.current = null
+        activeCreate.current = null
         navigate(`/sessions/${session.id}`)
       })
       .catch((err: unknown) => {
-        window.clearTimeout(slowTimer)
+        if (controller.signal.aborted) return
+        if (createSlowTimer.current !== null) window.clearTimeout(createSlowTimer.current)
+        createSlowTimer.current = null
+        activeCreate.current = null
         setCreateError(err instanceof Error ? err.message : 'Unknown error')
         setCreating(false)
         setCreatingSlow(false)

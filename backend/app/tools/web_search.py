@@ -111,7 +111,22 @@ class WebSearchTool:
         except ValueError as exc:
             raise ToolError(f"web search returned malformed JSON: {exc}", transient=False) from exc
 
-        results = data.get("results", [])
+        if not isinstance(data, dict):
+            raise ToolError("web search returned an invalid response", transient=False)
+
+        raw_results = data.get("results", [])
+        if not isinstance(raw_results, list):
+            raise ToolError("web search returned an invalid response", transient=False)
+
+        results = []
+        for result in raw_results:
+            if not isinstance(result, dict):
+                continue
+            parsed_url = urlparse(str(result.get("url", "")))
+            if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
+                continue
+            results.append(result)
+
         if include_domains:
             allowed_domains = tuple(include_domains)
             results = [
@@ -130,7 +145,7 @@ class WebSearchTool:
                 return "No results found from the requested official domains."
             return "No results found."
         lines = [
-            f"- {r.get('title', '')}: {r.get('url', '')} — {r.get('content', '')[:200]}"
+            f"- {r.get('title', '')}: {r.get('url', '')} — {str(r.get('content', ''))[:200]}"
             for r in results
         ]
         return "\n".join(lines)

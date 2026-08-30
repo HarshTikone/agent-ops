@@ -20,7 +20,7 @@ class _FakeTransport(httpx.BaseTransport):
 
 
 def _tool_with_response(
-    status_code: int, json_body: dict | None = None, text: str = ""
+    status_code: int, json_body: object | None = None, text: str = ""
 ) -> WebSearchTool:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["authorization"] == "Bearer test-key"
@@ -139,6 +139,40 @@ def test_domain_filter_allows_subdomains_of_the_requested_official_domain() -> N
         },
     )
     assert "docs.render.com" in tool.run(query="docs", include_domains=["render.com"])
+
+
+@pytest.mark.parametrize("url", ["javascript://render.com/alert", "ftp://render.com/file"])
+def test_search_discards_non_http_result_urls(url: str) -> None:
+    tool = _tool_with_response(
+        200,
+        {"results": [{"title": "Unsafe", "url": url, "content": "not web content"}]},
+    )
+    assert (
+        tool.run(query="official docs", include_domains=["render.com"])
+        == "No results found from the requested official domains."
+    )
+
+
+@pytest.mark.parametrize("json_body", [["not", "an", "object"], {"results": "not a list"}])
+def test_invalid_response_shape_is_a_permanent_tool_error(json_body: object) -> None:
+    tool = _tool_with_response(200, json_body)
+    with pytest.raises(ToolError, match="invalid response") as exc_info:
+        tool.run(query="anything")
+    assert exc_info.value.transient is False
+
+
+def test_malformed_result_entries_are_ignored_and_non_string_content_is_safe() -> None:
+    tool = _tool_with_response(
+        200,
+        {
+            "results": [
+                "not an object",
+                {"title": "Missing URL", "content": "ignored"},
+                {"title": "Valid", "url": "https://example.com", "content": 42},
+            ]
+        },
+    )
+    assert tool.run(query="anything") == "- Valid: https://example.com — 42"
 
 
 def test_timeout_is_a_transient_tool_error() -> None:

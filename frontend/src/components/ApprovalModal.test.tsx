@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
-import { ApprovalModal } from './ApprovalModal'
+import { ApprovalModal, MAX_REJECTION_REASON_LENGTH } from './ApprovalModal'
 import type { PendingAction } from '../lib/api'
 
 function makePendingAction(overrides: Partial<PendingAction> = {}): PendingAction {
@@ -81,6 +81,22 @@ describe('ApprovalModal', () => {
     )
     await user.click(screen.getByRole('button', { name: 'Reject' }))
     expect(onReject).toHaveBeenCalledWith('')
+  })
+
+  it('matches the API rejection-reason limit', () => {
+    render(
+      <ApprovalModal
+        pendingAction={makePendingAction()}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        submission={null}
+        error={null}
+      />,
+    )
+    expect(screen.getByLabelText(/reason/i)).toHaveAttribute(
+      'maxlength',
+      String(MAX_REJECTION_REASON_LENGTH),
+    )
   })
 
   it('disables both buttons and the reason field while submitting', () => {
@@ -163,6 +179,13 @@ describe('ApprovalModal', () => {
     expect(appShell.inert).toBe(true)
 
     const approve = screen.getByRole('button', { name: 'Approve' })
+    await user.tab({ shift: true })
+    expect(approve).toHaveFocus()
+
+    screen.getByRole('heading', { name: 'Approval needed' }).focus()
+    await user.tab()
+    expect(screen.getByLabelText(/reason/i)).toHaveFocus()
+
     approve.focus()
     await user.tab()
     expect(screen.getByLabelText(/reason/i)).toHaveFocus()

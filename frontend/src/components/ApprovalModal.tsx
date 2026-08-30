@@ -5,6 +5,8 @@ import { ShieldIcon } from './icons'
 
 export type ApprovalSubmission = 'approve' | 'reject' | null
 
+export const MAX_REJECTION_REASON_LENGTH = 1_000
+
 const FOCUSABLE_SELECTOR = [
   'button:not([disabled])',
   'textarea:not([disabled])',
@@ -65,10 +67,11 @@ export function ApprovalModal({
 
       const first = focusable[0]
       const last = focusable[focusable.length - 1]
-      if (event.shiftKey && document.activeElement === first) {
+      const focusIsOnControl = focusable.includes(document.activeElement as HTMLElement)
+      if (event.shiftKey && (!focusIsOnControl || document.activeElement === first)) {
         event.preventDefault()
         last?.focus()
-      } else if (!event.shiftKey && document.activeElement === last) {
+      } else if (!event.shiftKey && (!focusIsOnControl || document.activeElement === last)) {
         event.preventDefault()
         first?.focus()
       }
@@ -131,7 +134,7 @@ export function ApprovalModal({
               setReasonState({ actionId: pendingAction.id, value: event.target.value })
             }
             disabled={submitting}
-            maxLength={2_000}
+            maxLength={MAX_REJECTION_REASON_LENGTH}
             rows={2}
             className="input resize-y"
             placeholder="Optional"
