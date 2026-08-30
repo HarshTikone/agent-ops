@@ -1,9 +1,9 @@
 # Sprint 03 — Release Candidate and Public Demo
 
-> **Status: QA remediation locally verified; public redeployment pending (2026-08-29).** Public testing found
+> **Status: QA remediation deployed and release-image verified; final browser decision acceptance pending (2026-08-29).** Public testing found
 > rejection-replan, source-integrity, readiness-meaning, and cold-start UX
-> defects. Fixes are implemented locally; the release returns to complete only
-> after the full local matrix and a new public deployment pass.
+> defects. Fixes are live; the release returns to complete after fresh approval
+> and rejection decisions are submitted through the public frontend.
 
 ## Goal and constraints
 
@@ -117,10 +117,18 @@ domain work is included.
 | Public redesigned UI smoke | Passed | Readiness displayed as ready; session list, detail, and trace empty state loaded through Vercel |
 | Redesigned frontend E2E | Passed | Approval session `c1681a91-2be2-48e2-8a25-11ec287265ea` reached Done with an APPROVED write trace; rejection session `aba89b01-74f1-4c93-96f1-6ae7874a46f7` recorded two REJECTED decisions, no successful tool call, and a persisted Failed terminal state. Sanitized screenshots were captured. |
 | Final unauthenticated mutation check | Passed | After clearing the session-stored operator key, New session was blocked with the expected credential alert and created no session. |
-| Final backend remediation matrix | Passed | Ruff and Black clean; mypy clean across 35 application files; 172 tests passed with 95.27% coverage; 1 opt-in live test deselected. |
+| Final backend remediation matrix | Passed | Ruff and Black clean; mypy clean across 35 application files; 174 tests passed with 95.27% coverage; 1 opt-in live test deselected. |
 | Final frontend remediation matrix | Passed | ESLint and Prettier clean; 95 tests passed; coverage 87.50% statements / 81.81% branches / 87.23% functions / 92.72% lines; TypeScript and Vite production build passed. |
 | Production URL build gate | Passed | An explicit validation URL produced the deployable bundle; an all-whitespace `VITE_API_URL` made the production build exit 1 with the required configuration error. |
 | Remediation release image | Passed | Docker image rebuilt from the final backend; active Gemini, OpenRouter, Tavily, Supabase, and database checks all passed with outcome-only logs. |
+| Latest GitHub CI | Passed | Run `33291264865` passed backend lint/type/test/coverage, frontend lint/test/build, migration, and container smoke gates for commit `0c115a1`. |
+| Release-image live workflow | Passed | Run `33291323555`, attempt 2, built `agent-ops-backend:live`; skipped applied migrations 0001–0004; passed Gemini, OpenRouter, Tavily, Supabase, database, and the opt-in real approval integration test. |
+| GitHub secret recovery | Passed | The active check detected a malformed Actions `SUPABASE_URL`; only that secret was replaced from the locally validated value, without disclosure, and the rerun passed. |
+| Final Render deployment | Passed | Commit `0c115a1`, deploy `dep-da9qiseq1p3s738nq96g`, became Live in 41.1 seconds. |
+| Final Vercel deployment | Passed | Commit `0c115a1` became Ready at `agent-ebntodfzt-harshtikones-projects.vercel.app`; the stable production domain continues to serve the release. |
+| Remediation public read-only QA | Passed | Liveness/readiness 200 and ready; exact-origin CORS 200, disallowed origin 400; unauthenticated mutation 401; CSP and companion security headers present; wildcard and invalid-session routes accessible; browser console clean. |
+| Browser-side credential gates | Passed | A clean production tab blocked a missing-key mutation before network access and rejected a 31-byte key with an accessible validation alert. |
+| Sanitized release screenshot | Captured | [Public session and trace](evidence/qa-0822e48-public-session.png); the operator key value and provider credentials are not visible. |
 
 ## Production QA review — 2026-08-29
 
