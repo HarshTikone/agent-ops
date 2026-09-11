@@ -113,10 +113,7 @@ describe('TraceViewer', () => {
   it('formats a sub-second duration in milliseconds and a longer one in seconds', () => {
     render(
       <TraceViewer
-        events={[
-          event({ id: 1, duration_ms: 420 }),
-          event({ id: 2, duration_ms: 1_800 }),
-        ]}
+        events={[event({ id: 1, duration_ms: 420 }), event({ id: 2, duration_ms: 1_800 })]}
       />,
     )
     expect(screen.getByText('420ms')).toBeInTheDocument()

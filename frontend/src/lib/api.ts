@@ -159,12 +159,7 @@ export async function fetchReadiness(signal?: AbortSignal): Promise<ReadinessRes
  * that reads as a clean success is the bug this status exists to make visible.
  */
 export type SessionStatus =
-  | 'created'
-  | 'running'
-  | 'awaiting_approval'
-  | 'done'
-  | 'degraded'
-  | 'failed'
+  'created' | 'running' | 'awaiting_approval' | 'done' | 'degraded' | 'failed'
 
 export interface PendingAction {
   id: string

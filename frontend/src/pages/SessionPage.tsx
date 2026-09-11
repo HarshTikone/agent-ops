@@ -35,7 +35,9 @@ function summarizeTrace(events: TraceEvent[]): {
   costUsd: number | null
 } {
   const durations = events.map((e) => e.duration_ms).filter((v): v is number => v !== null)
-  const tokenCounts = events.flatMap((e) => [e.tokens_in, e.tokens_out]).filter((v): v is number => v !== null)
+  const tokenCounts = events
+    .flatMap((e) => [e.tokens_in, e.tokens_out])
+    .filter((v): v is number => v !== null)
   const costs = events.map((e) => e.cost_usd).filter((v): v is string => v !== null)
 
   return {
