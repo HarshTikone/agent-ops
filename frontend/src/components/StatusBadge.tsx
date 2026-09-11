@@ -8,6 +8,9 @@ const LABELS: Record<SessionStatus, string> = {
   running: 'Running',
   awaiting_approval: 'Needs approval',
   done: 'Done',
+  // Not "Done (degraded)": the run finished without a usable model answer, and
+  // the badge should read as a caution at a glance, not as a qualified success.
+  degraded: 'No summary',
   failed: 'Failed',
 }
 
@@ -18,6 +21,7 @@ const TAG_CLASSES: Record<SessionStatus, string> = {
   running: 'tag-accent',
   awaiting_approval: 'tag-warning',
   done: 'tag-success',
+  degraded: 'tag-warning',
   failed: 'tag-danger',
 }
 

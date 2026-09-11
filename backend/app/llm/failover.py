@@ -41,3 +41,16 @@ class FailoverProvider:
                 exc,
             )
             return self._fallback.generate(messages, tools)
+
+    def swapped(self) -> FailoverProvider:
+        """The same two providers, with primary and fallback exchanged.
+
+        `finalize_node` needs to retry an unusable answer on a *different*
+        provider, and it cannot get that by calling this object again: a 200
+        with an empty body is not a `TransientProviderError`, so the failover
+        never triggers and the primary would simply answer twice. Handing
+        finalize a `swapped()` copy makes the retry deliberately hit the other
+        provider first, while keeping transient-error protection in both
+        directions.
+        """
+        return FailoverProvider(self._fallback, self._primary)

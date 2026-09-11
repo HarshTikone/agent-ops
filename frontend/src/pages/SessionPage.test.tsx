@@ -79,12 +79,72 @@ describe('SessionPage', () => {
         level: 'success',
         provider: 'gemini',
         created_at: '2026-08-24T00:00:00Z',
+        started_at: '2026-08-24T00:00:00Z',
+        duration_ms: 850,
+        tokens_in: 120,
+        tokens_out: 40,
+        cost_usd: '0.000123',
       },
     ] as TraceEvent[])
     renderPage()
     expect(await screen.findByText('do a thing')).toBeInTheDocument()
     expect(screen.getByText('done!')).toBeInTheDocument()
     expect(screen.getByText('planned')).toBeInTheDocument()
+  })
+
+  it('shows run totals summarized from timed trace events, and an em dash when nothing was measured', async () => {
+    vi.mocked(api.getSession).mockResolvedValue(
+      makeSession({ status: 'done', task: 'do a thing', final_answer: 'done!' }),
+    )
+    vi.mocked(api.getTrace).mockResolvedValue([
+      {
+        id: 1,
+        session_id: SESSION_ID,
+        sequence: 1,
+        node: 'planner',
+        detail: 'planned',
+        level: 'success',
+        provider: 'gemini',
+        created_at: '2026-08-24T00:00:00Z',
+        started_at: '2026-08-24T00:00:00Z',
+        duration_ms: 800,
+        tokens_in: 100,
+        tokens_out: 50,
+        cost_usd: '0.000200',
+      },
+      {
+        id: 2,
+        session_id: SESSION_ID,
+        sequence: 2,
+        node: 'approval_gate',
+        detail: 'step=0 tool=notes_store APPROVED',
+        level: 'success',
+        provider: null,
+        created_at: '2026-08-24T00:01:00Z',
+        started_at: null,
+        duration_ms: null,
+        tokens_in: null,
+        tokens_out: null,
+        cost_usd: null,
+      },
+    ] as TraceEvent[])
+    renderPage()
+
+    const totals = await screen.findByLabelText('Run totals')
+    expect(totals).toHaveTextContent('800ms')
+    expect(totals).toHaveTextContent('150')
+    expect(totals).toHaveTextContent('$0.0002')
+  })
+
+  it('shows an em dash for every run total when no trace event measured anything', async () => {
+    vi.mocked(api.getSession).mockResolvedValue(
+      makeSession({ status: 'running', task: 'in progress' }),
+    )
+    vi.mocked(api.getTrace).mockResolvedValue([])
+    renderPage()
+
+    const totals = await screen.findByLabelText('Run totals')
+    expect(totals.textContent?.match(/—/g)).toHaveLength(3)
   })
 
   it('sends the first message and refreshes session + trace on success', async () => {

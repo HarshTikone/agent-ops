@@ -12,31 +12,84 @@ across the other nodes.
 from __future__ import annotations
 
 import logging
+import time
 import traceback
 from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END
 from langgraph.types import interrupt
 
-from app.graph.limits import MAX_REPLANS, MAX_STEP_RETRIES, MAX_TOOL_CALLS
-from app.graph.state import GraphState, new_trace_event
-from app.llm.base import LLMProvider, ToolCallRequest, ai_message_from_llm_response
+from app.answer_quality import scrub_tool_markup, validate_answer
+from app.graph.limits import MAX_PLANNING_ROUNDS, MAX_STEP_RETRIES, MAX_TOOL_CALLS
+from app.graph.state import GraphState, TraceEvent, new_trace_event, trace_event_after
+from app.llm.base import LLMProvider, LLMResponse, ToolCallRequest, ai_message_from_llm_response
+from app.llm.pricing import cost_for
 from app.sanitization import sanitize_error
 from app.tools.base import Tool
 from app.tools.errors import ToolError
 
 logger = logging.getLogger("agent_ops.graph")
 
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _elapsed_ms(started: float) -> int:
+    return round((time.monotonic() - started) * 1000)
+
+
+class _LLMTimingFields(TypedDict):
+    started_at: str
+    duration_ms: int
+    tokens_in: int | None
+    tokens_out: int | None
+    cost_usd: str | None
+
+
+def _llm_timing_fields(
+    response: LLMResponse, *, started_at: str, duration_ms: int
+) -> _LLMTimingFields:
+    """Timing/usage/cost kwargs for a trace event built around one
+    `llm.generate()` call — shared by `planner_node`, `verify_node`, and
+    `finalize_node` so the three don't drift on how usage is read or cost is
+    priced. A `TypedDict` rather than a plain `dict[str, ...]` so `**`-
+    unpacking this into `new_trace_event`/`trace_event_after` type-checks
+    each field against its own parameter instead of a single unioned type.
+    """
+    cost = cost_for(response.model, response.usage)
+    return _LLMTimingFields(
+        started_at=started_at,
+        duration_ms=duration_ms,
+        tokens_in=response.usage.input_tokens if response.usage else None,
+        tokens_out=response.usage.output_tokens if response.usage else None,
+        cost_usd=str(cost) if cost is not None else None,
+    )
+
+
 PLANNER_SYSTEM_PROMPT = (
-    "You are the planning stage of a tool-using agent. Break the user's task "
-    "into the minimum sequence of tool calls needed to complete it. Call the "
-    "available tools directly — each tool call you make becomes one step of "
-    "the plan, executed in the order you call them. If the task needs no "
-    "tool, answer directly instead of calling a tool. When the user asks for "
-    "official, primary, or explicitly named web sources, web_search MUST use "
-    "include_domains with only the requested official hostnames. Never silently "
-    "substitute third-party sources for requested official evidence."
+    "You are the planning stage of a tool-using agent. Call the single next "
+    "tool needed to make progress on the user's task, given everything that "
+    "has happened so far in this conversation. Call one tool at a time — do "
+    "not try to plan out the whole task in one turn; a separate check runs "
+    "after every tool call and will bring you back here if more work is "
+    "still needed. If the task needs no tool at all, or is already fully "
+    "complete, answer directly instead of calling a tool. When the user asks "
+    "for official, primary, or explicitly named web sources, web_search MUST "
+    "use include_domains with only the requested official hostnames. Never "
+    "silently substitute third-party sources for requested official evidence."
+)
+
+VERIFY_PROMPT = (
+    "Given the original task and everything that has happened above, is the "
+    "task now fully complete? Respond with exactly one line: the single "
+    "word DONE if nothing further is needed, or the word CONTINUE followed "
+    "by a colon and a short instruction for what to do next if more work "
+    "remains. Never call a tool yourself here — you are only judging, not "
+    "acting."
 )
 
 
@@ -46,7 +99,10 @@ def make_planner_node(llm: LLMProvider, langchain_tools: list) -> Callable[[Grap
             SystemMessage(content=PLANNER_SYSTEM_PROMPT),
             HumanMessage(content=state["task"]),
         ]
+        started_at = _now_iso()
+        started = time.monotonic()
         response = llm.generate(messages, tools=langchain_tools)
+        duration_ms = _elapsed_ms(started)
         new_messages = [*messages, ai_message_from_llm_response(response)]
         trace_entry = new_trace_event(
             state,
@@ -54,6 +110,7 @@ def make_planner_node(llm: LLMProvider, langchain_tools: list) -> Callable[[Grap
             detail=f"provider={response.provider} steps={[tc.name for tc in response.tool_calls]}",
             level="success",
             provider=response.provider,
+            **_llm_timing_fields(response, started_at=started_at, duration_ms=duration_ms),
         )
 
         if not response.tool_calls:
@@ -113,6 +170,15 @@ def approval_gate_node(state: GraphState) -> dict:
     short-circuits replay, not the surrounding node) -- isolating it here
     means only this small, idempotent check re-executes, not tool_call's
     counter increments or tool.run() side effects.
+
+    Deliberately untimed (P3): the pause between `interrupt()` and resume is
+    an operator's think time, not system latency, and it spans two separate
+    HTTP requests/processes — no `time.monotonic()` reading taken inside this
+    function body could span that gap correctly even if it wanted to. Its
+    trace events carry no `duration_ms`, which is what keeps a four-minute
+    approval wait out of a run's reported wall time;
+    `pending_actions.created_at`/`decided_at` is the right place to measure
+    operator wait time instead.
     """
     step = state["plan"][state["step_index"]]
     if not _needs_approval(step):
@@ -208,6 +274,8 @@ def make_tool_call_node(
         if _needs_approval(step) and on_irreversible_tool_attempt is not None:
             on_irreversible_tool_attempt()
 
+        started_at = _now_iso()
+        started = time.monotonic()
         try:
             result = tool.invoke(step.arguments)
         except ToolError as exc:
@@ -237,6 +305,8 @@ def make_tool_call_node(
                             f"{safe_error}"
                         ),
                         level="warning" if exc.transient else "error",
+                        started_at=started_at,
+                        duration_ms=_elapsed_ms(started),
                     ),
                 ],
             }
@@ -264,6 +334,8 @@ def make_tool_call_node(
                         node="tool_call",
                         detail=f"FAILED (permanent): {error_text}",
                         level="error",
+                        started_at=started_at,
+                        duration_ms=_elapsed_ms(started),
                     ),
                 ],
             }
@@ -276,7 +348,12 @@ def make_tool_call_node(
             "trace": [
                 *state["trace"],
                 new_trace_event(
-                    state, node="tool_call", detail=f"OK: {result[:200]}", level="success"
+                    state,
+                    node="tool_call",
+                    detail=f"OK: {result[:200]}",
+                    level="success",
+                    started_at=started_at,
+                    duration_ms=_elapsed_ms(started),
                 ),
             ],
         }
@@ -330,22 +407,26 @@ def decide_next_node(state: GraphState) -> dict:
     # FINISHING (C3, ADR-020) — it's checked inside each of those three
     # branches below, right before they'd consume another tool call, not
     # unconditionally at the top. A plan that succeeds on exactly its
-    # MAX_TOOL_CALLS-th step must still reach `finalize`: the cap exists to
-    # stop a run that hasn't finished from burning unbounded budget, not to
-    # retroactively fail one that just did. See limits.py's docstring for
-    # the full precedence statement.
+    # MAX_TOOL_CALLS-th step must still reach `verify`/`finalize`: the cap
+    # exists to stop a run that hasn't finished from burning unbounded
+    # budget, not to retroactively fail one that just did. See limits.py's
+    # docstring for the full precedence statement.
     if state["last_failure"] is None:
         next_index = state["step_index"] + 1
         if next_index >= len(state["plan"]):
             return {
-                "next_action": "finalize",
+                # P2: the plan running out does not by itself mean the TASK
+                # is done — verify_node is what decides that, and sends the
+                # run back to planner when it isn't. decide_next itself
+                # never emits "finalize" any more.
+                "next_action": "verify",
                 "step_index": next_index,
                 "trace": [
                     *state["trace"],
                     new_trace_event(
                         state,
                         node="decide_next",
-                        detail="plan complete -> finalize",
+                        detail="plan complete -> verify",
                         level="success",
                     ),
                 ],
@@ -395,7 +476,7 @@ def decide_next_node(state: GraphState) -> dict:
             ],
         }
 
-    if state["replans"] < MAX_REPLANS:
+    if state["replans"] < MAX_PLANNING_ROUNDS:
         if state["tool_calls_made"] >= MAX_TOOL_CALLS:
             return _give_up_on_cap(state)
         step = state["plan"][state["step_index"]]
@@ -417,7 +498,10 @@ def decide_next_node(state: GraphState) -> dict:
                 new_trace_event(
                     state,
                     node="decide_next",
-                    detail=f"step {state['step_index']} not retryable -> replan ({replan_count}/{MAX_REPLANS})",
+                    detail=(
+                        f"step {state['step_index']} not retryable -> replan "
+                        f"({replan_count}/{MAX_PLANNING_ROUNDS})"
+                    ),
                     level="warning",
                 ),
             ],
@@ -444,36 +528,235 @@ def route_after_decide(state: GraphState) -> str:
         "advance": "delegate",
         "retry": "delegate",
         "replan": "planner",
-        "finalize": "finalize",
+        "verify": "verify",
         "give_up": END,
     }[state["next_action"]]
 
 
-def make_finalize_node(llm: LLMProvider) -> Callable[[GraphState], dict]:
-    def finalize_node(state: GraphState) -> dict:
-        prompt = HumanMessage(
+def _parse_verify_response(content: str) -> tuple[bool, str]:
+    """`True` plus an empty reason for a DONE judgment; `False` plus the
+    guidance text after the colon for a CONTINUE one. A response that
+    ignores the requested format entirely (no leading DONE, no colon) is
+    treated as "not done" and its whole content used as guidance — a
+    malformed judgment must never be silently read as complete.
+    """
+    normalized = content.strip()
+    if normalized.upper().startswith("DONE"):
+        return True, ""
+    _, _, guidance = normalized.partition(":")
+    guidance = guidance.strip() or normalized or "continue working toward the task"
+    return False, guidance
+
+
+def make_verify_node(llm: LLMProvider) -> Callable[[GraphState], dict]:
+    """P2: the check that makes going back to `planner` the NORMAL way a
+    multi-step task progresses, not just a failure-recovery path.
+
+    A real node rather than an `if` folded into `decide_next` — it emits its
+    own trace event, so a viewer watches the agent decide "not done yet" as
+    it happens (ARCHITECTURE.md's "the trace is the product" thesis, and the
+    same reasoning ADR-012 already gives for `decide_next` being a node).
+
+    Bounded by `MAX_PLANNING_ROUNDS` (`limits.py`), checked here rather than
+    left to `MAX_TOOL_CALLS` alone: a task the tools genuinely cannot
+    satisfy must reach `give_up` once this budget is spent, not spin all the
+    way to the tool-call cap first — a `verify` node that always answers
+    "not done" is otherwise an infinite loop with no budget of its own.
+    """
+
+    def verify_node(state: GraphState) -> dict:
+        messages = [*state["messages"], HumanMessage(content=VERIFY_PROMPT)]
+        started_at = _now_iso()
+        started = time.monotonic()
+        response = llm.generate(messages, tools=None)
+        duration_ms = _elapsed_ms(started)
+        timing = _llm_timing_fields(response, started_at=started_at, duration_ms=duration_ms)
+
+        complete, guidance = _parse_verify_response(response.content)
+
+        if complete:
+            trace_entry = new_trace_event(
+                state,
+                node="verify",
+                detail=f"provider={response.provider} complete -> finalize",
+                level="success",
+                provider=response.provider,
+                **timing,
+            )
+            return {"next_action": "finalize", "trace": [*state["trace"], trace_entry]}
+
+        if state["replans"] >= MAX_PLANNING_ROUNDS:
+            trace_entry = new_trace_event(
+                state,
+                node="verify",
+                detail=(
+                    f"give_up: not complete after {MAX_PLANNING_ROUNDS} planning "
+                    f"round(s): {guidance}"
+                ),
+                level="error",
+                provider=response.provider,
+                **timing,
+            )
+            return {
+                "next_action": "give_up",
+                "status": "failed",
+                "final_answer": f"Could not complete the task: {guidance}",
+                "trace": [*state["trace"], trace_entry],
+            }
+
+        replan_count = state["replans"] + 1
+        continuation = HumanMessage(
             content=(
-                "Summarize the results above into a final answer for the user. "
-                "Cite every web-derived claim with the exact result URL. If an "
-                "official-domain search returned no compliant results, say that "
-                "official evidence could not be found and do not substitute an "
-                "unrequested third-party source."
+                f"The task is not yet complete: {guidance}. Continue — call the "
+                "single next tool needed."
             )
         )
-        response = llm.generate([*state["messages"], prompt], tools=None)
+        trace_entry = new_trace_event(
+            state,
+            node="verify",
+            detail=(
+                f"provider={response.provider} not complete "
+                f"({replan_count}/{MAX_PLANNING_ROUNDS}) -> planner: {guidance}"
+            ),
+            level="warning",
+            provider=response.provider,
+            **timing,
+        )
         return {
-            "status": "done",
-            "final_answer": response.content,
-            "trace": [
-                *state["trace"],
-                new_trace_event(
-                    state,
+            "next_action": "replan",
+            "replans": replan_count,
+            "messages": [*state["messages"], continuation],
+            "trace": [*state["trace"], trace_entry],
+        }
+
+    return verify_node
+
+
+def route_after_verify(state: GraphState) -> str:
+    return {"finalize": "finalize", "replan": "planner", "give_up": END}[state["next_action"]]
+
+
+FINALIZE_PROMPT = (
+    "Summarize the results above into a final answer for the user. "
+    "Cite every web-derived claim with the exact result URL. If an "
+    "official-domain search returned no compliant results, say that "
+    "official evidence could not be found and do not substitute an "
+    "unrequested third-party source. Write prose addressed to a person: the "
+    "tools have already run and their results are above, so never emit "
+    "tool-call syntax of any kind."
+)
+
+# How much of one tool's output the fallback answer quotes. Long enough to
+# carry a real result, short enough that a page-long web_search payload does
+# not become the user's "answer".
+_FALLBACK_RESULT_CHARS = 400
+
+
+def _fallback_answer(state: GraphState) -> str:
+    """A deterministic answer assembled from the tool results that ran.
+
+    Used only when no provider returned something usable. It is plainly worse
+    than a real summary, and that is the point — it is honest about what
+    happened and still hands over the work the run actually did, which beats
+    both the empty string and the raw markup that production shipped before.
+
+    Tool output is scrubbed on the way in: a tool that returned something
+    markup-shaped must not make the one guaranteed-valid answer invalid.
+    """
+    tool_messages = [m for m in state["messages"] if isinstance(m, ToolMessage)]
+    header = (
+        "The summarizing model did not return a usable answer, so this is a "
+        "direct report of the steps that ran."
+    )
+    if not tool_messages:
+        return f"{header} No tool produced a result for this task, so there is nothing to report."
+
+    lines = []
+    for message in tool_messages:
+        content = scrub_tool_markup(str(message.content)).strip()
+        excerpt = content[:_FALLBACK_RESULT_CHARS] or "(no output)"
+        if len(content) > _FALLBACK_RESULT_CHARS:
+            excerpt += "…"
+        lines.append(f"- {message.name}: {excerpt}")
+    return "\n".join([header, "", *lines])
+
+
+def make_finalize_node(
+    llm: LLMProvider,
+    retry_llm: LLMProvider | None = None,
+) -> Callable[[GraphState], dict]:
+    """Summarize the run — and refuse to report an answer that isn't one.
+
+    Three outcomes, in order of preference:
+
+    1. The primary provider returns an answer that passes `validate_answer`
+       -> `done`.
+    2. It doesn't, but `retry_llm` (a *different* provider — see `build_graph`)
+       does -> `done`, with the rejection still recorded in the trace so the
+       near-miss stays visible rather than being quietly papered over.
+    3. Neither does -> `degraded`, carrying `_fallback_answer`.
+
+    Case 2 cannot be delegated to `FailoverProvider`. That layer only catches
+    `TransientProviderError` (ADR-002), and an empty or markup-bearing body
+    arrives as a perfectly successful HTTP 200 — no exception is ever raised,
+    so nothing downstream of the provider can notice. The retry has to be
+    driven from here, by the only code that knows the *content* was unusable.
+
+    The invariant this node now holds, and did not before: it never reports
+    `done` without an answer that passed validation, and never stamps
+    `level="success"` on an answer it rejected.
+    """
+
+    def finalize_node(state: GraphState) -> dict:
+        messages = [*state["messages"], HumanMessage(content=FINALIZE_PROMPT)]
+        trace: list[TraceEvent] = list(state["trace"])
+        providers = [llm] if retry_llm is None else [llm, retry_llm]
+        rejections: list[str] = []
+
+        for provider in providers:
+            started_at = _now_iso()
+            started = time.monotonic()
+            response = provider.generate(messages, tools=None)
+            duration_ms = _elapsed_ms(started)
+            timing = _llm_timing_fields(response, started_at=started_at, duration_ms=duration_ms)
+            reason = validate_answer(response.content)
+
+            if reason is None:
+                detail = f"provider={response.provider}"
+                if rejections:
+                    detail += f" (accepted on retry; rejected: {'; '.join(rejections)})"
+                trace.append(
+                    trace_event_after(
+                        trace,
+                        node="finalize",
+                        detail=detail,
+                        level="success",
+                        provider=response.provider,
+                        **timing,
+                    )
+                )
+                return {"status": "done", "final_answer": response.content, "trace": trace}
+
+            rejections.append(f"{response.provider}: {reason}")
+            logger.warning("finalize_rejected provider=%s reason=%s", response.provider, reason)
+            trace.append(
+                trace_event_after(
+                    trace,
                     node="finalize",
-                    detail=f"provider={response.provider}",
-                    level="success",
+                    detail=f"provider={response.provider} REJECTED: {reason}",
+                    level="warning",
                     provider=response.provider,
-                ),
-            ],
+                    **timing,
+                )
+            )
+
+        detail = f"no usable answer from {len(providers)} provider(s) -> degraded"
+        logger.error("finalize_degraded rejections=%s", "; ".join(rejections))
+        trace.append(trace_event_after(trace, node="finalize", detail=detail, level="error"))
+        return {
+            "status": "degraded",
+            "final_answer": _fallback_answer(state),
+            "trace": trace,
         }
 
     return finalize_node

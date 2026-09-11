@@ -19,6 +19,9 @@ from app.graph.serde import GRAPH_SERDE
 from app.graph.state import initial_state
 from app.llm.base import LLMResponse, ToolCallRequest
 
+# P2: a completed plan now routes through `verify` before `finalize`.
+_VERIFY_DONE = LLMResponse(content="DONE", tool_calls=[], provider="gemini")
+
 
 class _SpyTool:
     def __init__(self, name: str) -> None:
@@ -98,7 +101,10 @@ def test_approval_resumes_and_runs_the_tool() -> None:
                 ],
                 provider="gemini",
             ),
-            LLMResponse(content="saved it", tool_calls=[], provider="gemini"),
+            _VERIFY_DONE,
+            LLMResponse(
+                content="The note was saved as requested.", tool_calls=[], provider="gemini"
+            ),
         ]
     )
     graph = build_graph(llm, tools, langchain_tools=[], checkpointer=checkpointer)
@@ -110,7 +116,7 @@ def test_approval_resumes_and_runs_the_tool() -> None:
     assert "__interrupt__" not in result
     assert tools["notes_store"].calls == [{"action": "write", "key": "k", "content": "v"}]
     assert result["status"] == "done"
-    assert result["final_answer"] == "saved it"
+    assert result["final_answer"] == "The note was saved as requested."
 
 
 def test_rejection_is_terminal_and_never_runs_or_replans() -> None:
@@ -160,6 +166,7 @@ def test_read_and_list_actions_never_pause() -> None:
                 ],
                 provider="gemini",
             ),
+            _VERIFY_DONE,
             LLMResponse(content="here they are", tool_calls=[], provider="gemini"),
         ]
     )
@@ -199,7 +206,10 @@ def test_two_write_steps_each_pause_independently() -> None:
                 ],
                 provider="gemini",
             ),
-            LLMResponse(content="both saved", tool_calls=[], provider="gemini"),
+            _VERIFY_DONE,
+            LLMResponse(
+                content="Both notes were saved as requested.", tool_calls=[], provider="gemini"
+            ),
         ]
     )
     graph = build_graph(llm, tools, langchain_tools=[], checkpointer=checkpointer)

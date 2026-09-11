@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import type { TraceEvent } from '../lib/api'
+import { formatDuration } from '../lib/format'
 import { CheckCircleIcon, InfoCircleIcon, TriangleAlertIcon, XCircleIcon } from './icons'
 
 /**
@@ -7,7 +8,7 @@ import { CheckCircleIcon, InfoCircleIcon, TriangleAlertIcon, XCircleIcon } from 
  * §0) — this renders every agent decision and tool call as it happened, not
  * just the final answer. Node names are shown as-is (they're the graph's
  * real node identifiers: planner/delegate/approval_gate/tool_call/observe/
- * decide_next/finalize — ARCHITECTURE.md §2), colored by what actually
+ * decide_next/verify/finalize — ARCHITECTURE.md §2), colored by what actually
  * happened rather than by node type alone, so a retry or a rejection is
  * visible at a glance without reading every line of detail text.
  */
@@ -54,6 +55,7 @@ const NODE_LABELS: Record<string, string> = {
   tool_call: 'TOOL CALL',
   observe: 'OBSERVE',
   decide_next: 'DECIDE',
+  verify: 'VERIFY',
   finalize: 'FINALIZE',
 }
 
@@ -82,14 +84,19 @@ export function TraceViewer({ events }: { events: TraceEvent[] }) {
           >
             <span className="trace-tone mt-[1px] flex-none">{TONE_ICONS[tone]}</span>
             <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-baseline gap-x-2">
-                <span className="trace-tone [font-family:var(--font-heading)] text-xs font-semibold tracking-[0.04em]">
-                  {nodeLabel(event.node)}
+              <div className="flex flex-wrap items-baseline justify-between gap-x-2">
+                <div className="flex flex-wrap items-baseline gap-x-2">
+                  <span className="trace-tone [font-family:var(--font-heading)] text-xs font-semibold tracking-[0.04em]">
+                    {nodeLabel(event.node)}
+                  </span>
+                  {event.provider && (
+                    <span className="text-muted text-[11px]">via {event.provider}</span>
+                  )}
+                  <span className="text-muted text-[11px]">{formatTime(event.created_at)}</span>
+                </div>
+                <span className="text-muted [font-variant-numeric:tabular-nums] text-[11px]">
+                  {formatDuration(event.duration_ms)}
                 </span>
-                {event.provider && (
-                  <span className="text-muted text-[11px]">via {event.provider}</span>
-                )}
-                <span className="text-muted text-[11px]">{formatTime(event.created_at)}</span>
               </div>
               <p className="mt-[3px] text-[13px] break-words">{event.detail}</p>
             </div>

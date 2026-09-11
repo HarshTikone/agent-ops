@@ -68,6 +68,11 @@ def _persist_new_trace_events(conn: DbConnection, session_id: UUID, trace: list[
             detail=event["detail"],
             level=event["level"],
             provider=event["provider"],
+            started_at=event.get("started_at"),
+            duration_ms=event.get("duration_ms"),
+            tokens_in=event.get("tokens_in"),
+            tokens_out=event.get("tokens_out"),
+            cost_usd=event.get("cost_usd"),
         )
 
 
@@ -89,12 +94,18 @@ def _apply_result(pool: DbPool, session_id: UUID, result: dict[str, Any]) -> Non
 
         status = result.get("status", "running")
         final_answer = result.get("final_answer")
-        if status == "done":
+        # `done` and `degraded` are both terminal and both answer-bearing, so
+        # they persist identically apart from the status itself: a degraded run
+        # still produced work worth showing, it just isn't the model's own
+        # summary (see `make_finalize_node`). Keeping the two statuses distinct
+        # is what lets `scripts/audit_sessions.py` and the UI tell them apart
+        # instead of counting a fallback as a clean success.
+        if status in ("done", "degraded"):
             repo.add_message_on_connection(
                 conn, session_id, role="assistant", content=final_answer or ""
             )
             repo.update_session_status_on_connection(
-                conn, session_id, status="done", final_answer=final_answer
+                conn, session_id, status=status, final_answer=final_answer
             )
         elif status == "failed":
             repo.update_session_status_on_connection(

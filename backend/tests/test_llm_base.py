@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage
 from app.llm.base import (
     LLMProvider,
     LLMResponse,
+    TokenUsage,
     ToolCallRequest,
     ai_message_from_llm_response,
     llm_response_from_ai_message,
@@ -61,6 +62,36 @@ def test_empty_content_with_only_tool_calls_is_an_empty_string() -> None:
     assert response.tool_calls == [
         ToolCallRequest(id="c1", name="calculator", arguments={"expression": "1+1"})
     ]
+
+
+def test_extracts_usage_and_model_when_the_provider_reports_them() -> None:
+    """LangChain populates `usage_metadata` for both Gemini and OpenRouter
+    integrations (verified against the installed packages) — this is what
+    makes token capture one change here rather than two per-provider ones
+    (see app/llm/base.py's LLMResponse docstring)."""
+    message = AIMessage(
+        content="47 times 89 is 4,183.",
+        usage_metadata={"input_tokens": 120, "output_tokens": 8, "total_tokens": 128},
+        response_metadata={"model_name": "gemini-3.1-flash-lite"},
+    )
+    response = llm_response_from_ai_message(message, provider="gemini")
+    assert response.usage == TokenUsage(input_tokens=120, output_tokens=8)
+    assert response.model == "gemini-3.1-flash-lite"
+
+
+def test_usage_and_model_are_none_when_the_provider_omits_them() -> None:
+    message = AIMessage(content="pong")
+    response = llm_response_from_ai_message(message, provider="gemini")
+    assert response.usage is None
+    assert response.model is None
+
+
+def test_llm_response_defaults_usage_and_model_to_none() -> None:
+    """Every existing caller/test double that builds an `LLMResponse` without
+    these two fields must keep working unchanged."""
+    response = LLMResponse(content="ok", tool_calls=[], provider="gemini")
+    assert response.usage is None
+    assert response.model is None
 
 
 def test_ai_message_from_llm_response_round_trips_tool_calls() -> None:

@@ -9,6 +9,7 @@ never have surfaced.
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 
 from app import repository as repo
 
@@ -139,6 +140,40 @@ def test_trace_events_round_trip_in_order(db_pool, session_row) -> None:
     assert [e["level"] for e in events] == ["info", "info"]
     assert events[0]["provider"] == "gemini"
     assert events[1]["provider"] is None
+
+
+def test_trace_events_round_trip_timing_tokens_and_cost(db_pool, session_row) -> None:
+    """P3: the five observability columns added by migration 0006."""
+    repo.add_trace_event(
+        db_pool,
+        session_row["id"],
+        node="planner",
+        detail="a",
+        provider="gemini",
+        started_at="2026-09-11T12:00:00+00:00",
+        duration_ms=850,
+        tokens_in=120,
+        tokens_out=40,
+        cost_usd="0.000123",
+    )
+
+    event = repo.list_trace_events(db_pool, session_row["id"])[0]
+    assert event["duration_ms"] == 850
+    assert event["tokens_in"] == 120
+    assert event["tokens_out"] == 40
+    assert event["cost_usd"] == Decimal("0.000123")
+    assert event["started_at"] is not None
+
+
+def test_trace_events_default_observability_fields_to_none(db_pool, session_row) -> None:
+    repo.add_trace_event(db_pool, session_row["id"], node="delegate", detail="b")
+
+    event = repo.list_trace_events(db_pool, session_row["id"])[0]
+    assert event["started_at"] is None
+    assert event["duration_ms"] is None
+    assert event["tokens_in"] is None
+    assert event["tokens_out"] is None
+    assert event["cost_usd"] is None
 
 
 def test_trace_sequence_makes_replayed_event_idempotent(db_pool, session_row) -> None:

@@ -17,6 +17,9 @@ from app.graph.build import build_graph
 from app.graph.state import initial_state
 from app.llm.base import LLMResponse, ToolCallRequest
 
+# P2: a completed plan now routes through `verify` before `finalize`.
+_VERIFY_DONE = LLMResponse(content="DONE", tool_calls=[], provider="gemini")
+
 
 class _SpyTool:
     def __init__(self, name: str) -> None:
@@ -68,7 +71,10 @@ def test_planner_selected_tool_is_the_one_actually_invoked(
                 tool_calls=[ToolCallRequest(id="call_1", name=selected_tool, arguments=arguments)],
                 provider="gemini",
             ),
-            LLMResponse(content="done", tool_calls=[], provider="gemini"),
+            _VERIFY_DONE,
+            LLMResponse(
+                content="The requested tool call completed.", tool_calls=[], provider="gemini"
+            ),
         ]
     )
     graph = build_graph(llm, tools, langchain_tools=[])
@@ -114,6 +120,7 @@ def test_multi_step_plan_invokes_each_tool_in_order() -> None:
                 ],
                 provider="gemini",
             ),
+            _VERIFY_DONE,
             LLMResponse(content="both steps done", tool_calls=[], provider="gemini"),
         ]
     )

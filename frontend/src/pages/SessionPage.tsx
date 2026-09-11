@@ -15,6 +15,67 @@ import { ChatPanel } from '../components/ChatPanel'
 import { ArrowLeftIcon } from '../components/icons'
 import { StatusBadge } from '../components/StatusBadge'
 import { TraceViewer } from '../components/TraceViewer'
+import { formatDuration } from '../lib/format'
+
+/**
+ * Run totals for the session header (P3): wall time is the SUM of each
+ * timed node's own `duration_ms`, not `last.created_at - first.created_at`.
+ * An approval pause can hold a session open for minutes of operator think
+ * time between two trace rows — see `approval_gate_node`'s docstring — and
+ * that gap must not be reported as agent latency. Untimed nodes simply
+ * don't contribute, so the sum is exactly "time the agent itself spent
+ * calling a provider or a tool."
+ *
+ * Each total renders "—", not 0, when nothing in the trace measured it —
+ * distinguishing "not measured" from "measured as zero/free".
+ */
+function summarizeTrace(events: TraceEvent[]): {
+  wallMs: number | null
+  tokensTotal: number | null
+  costUsd: number | null
+} {
+  const durations = events.map((e) => e.duration_ms).filter((v): v is number => v !== null)
+  const tokenCounts = events.flatMap((e) => [e.tokens_in, e.tokens_out]).filter((v): v is number => v !== null)
+  const costs = events.map((e) => e.cost_usd).filter((v): v is string => v !== null)
+
+  return {
+    wallMs: durations.length > 0 ? durations.reduce((sum, ms) => sum + ms, 0) : null,
+    tokensTotal: tokenCounts.length > 0 ? tokenCounts.reduce((sum, n) => sum + n, 0) : null,
+    costUsd: costs.length > 0 ? costs.reduce((sum, c) => sum + Number(c), 0) : null,
+  }
+}
+
+function formatTokenTotal(tokens: number | null): string {
+  return tokens === null ? '—' : tokens.toLocaleString()
+}
+
+function formatCostTotal(costUsd: number | null): string {
+  if (costUsd === null) return '—'
+  return `$${costUsd < 0.01 && costUsd > 0 ? costUsd.toFixed(4) : costUsd.toFixed(2)}`
+}
+
+function RunTotals({ events }: { events: TraceEvent[] }) {
+  const totals = summarizeTrace(events)
+  return (
+    <dl
+      aria-label="Run totals"
+      className="text-muted m-0 flex gap-[var(--space-4)] text-xs [font-variant-numeric:tabular-nums]"
+    >
+      <div className="m-0">
+        <dt className="inline">wall </dt>
+        <dd className="m-0 inline font-medium">{formatDuration(totals.wallMs)}</dd>
+      </div>
+      <div className="m-0">
+        <dt className="inline">tokens </dt>
+        <dd className="m-0 inline font-medium">{formatTokenTotal(totals.tokensTotal)}</dd>
+      </div>
+      <div className="m-0">
+        <dt className="inline">cost </dt>
+        <dd className="m-0 inline font-medium">{formatCostTotal(totals.costUsd)}</dd>
+      </div>
+    </dl>
+  )
+}
 
 type LoadState =
   | { state: 'loading' }
@@ -215,7 +276,10 @@ export function SessionPage() {
                 SESSION · {load.session.id.slice(-4).toUpperCase()}
               </p>
             </div>
-            <StatusBadge status={load.session.status} className="px-3 py-[5px] text-xs" />
+            <div className="flex flex-wrap items-center gap-[var(--space-4)]">
+              <RunTotals events={load.trace} />
+              <StatusBadge status={load.session.status} className="px-3 py-[5px] text-xs" />
+            </div>
           </div>
 
           <section aria-label="Chat" className="mb-[var(--space-8)]">

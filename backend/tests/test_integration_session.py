@@ -203,6 +203,8 @@ def test_forced_transient_failure_retries_and_persists_correctly(db_pool) -> Non
                     ],
                     provider="gemini",
                 ),
+                # P2: a completed plan now routes through `verify` before `finalize`.
+                LLMResponse(content="DONE", tool_calls=[], provider="gemini"),
                 LLMResponse(content="the answer is 4", tool_calls=[], provider="gemini"),
             ]
         )

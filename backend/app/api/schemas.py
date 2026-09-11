@@ -6,6 +6,7 @@ routers — `PendingActionResponse` is embedded inside `SessionResponse`
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from uuid import UUID
 
 from fastapi import Query
@@ -45,6 +46,13 @@ class TraceEventResponse(BaseModel):
     level: str
     provider: str | None
     created_at: datetime
+    # P3 observability fields — null for events emitted before this shipped,
+    # and for nodes (approval_gate) that deliberately don't measure duration.
+    started_at: datetime | None = None
+    duration_ms: int | None = None
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    cost_usd: Decimal | None = None
 
 
 class CreateMessageRequest(BaseModel):

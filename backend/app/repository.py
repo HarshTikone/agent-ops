@@ -185,6 +185,11 @@ def add_trace_event(
     sequence: int | None = None,
     level: TraceLevel = "info",
     provider: str | None = None,
+    started_at: str | None = None,
+    duration_ms: int | None = None,
+    tokens_in: int | None = None,
+    tokens_out: int | None = None,
+    cost_usd: str | None = None,
 ) -> dict[str, Any] | None:
     with pool.connection() as conn:
         return add_trace_event_on_connection(
@@ -195,6 +200,11 @@ def add_trace_event(
             sequence=sequence,
             level=level,
             provider=provider,
+            started_at=started_at,
+            duration_ms=duration_ms,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            cost_usd=cost_usd,
         )
 
 
@@ -207,6 +217,11 @@ def add_trace_event_on_connection(
     sequence: int | None = None,
     level: TraceLevel = "info",
     provider: str | None = None,
+    started_at: str | None = None,
+    duration_ms: int | None = None,
+    tokens_in: int | None = None,
+    tokens_out: int | None = None,
+    cost_usd: str | None = None,
 ) -> dict[str, Any] | None:
     if sequence is None:
         row = conn.execute(
@@ -219,19 +234,36 @@ def add_trace_event_on_connection(
         sequence = row["sequence"]
     return conn.execute(
         """
-        INSERT INTO trace_events (session_id, sequence, node, detail, level, provider)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO trace_events (
+            session_id, sequence, node, detail, level, provider,
+            started_at, duration_ms, tokens_in, tokens_out, cost_usd
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (session_id, sequence) DO NOTHING
-        RETURNING id, session_id, sequence, node, detail, level, provider, created_at
+        RETURNING id, session_id, sequence, node, detail, level, provider, created_at,
+            started_at, duration_ms, tokens_in, tokens_out, cost_usd
         """,
-        (session_id, sequence, node, detail, level, provider),
+        (
+            session_id,
+            sequence,
+            node,
+            detail,
+            level,
+            provider,
+            started_at,
+            duration_ms,
+            tokens_in,
+            tokens_out,
+            cost_usd,
+        ),
     ).fetchone()
 
 
 def list_trace_events(pool: DbPool, session_id: UUID) -> list[dict[str, Any]]:
     with pool.connection() as conn:
         return conn.execute(
-            "SELECT id, session_id, sequence, node, detail, level, provider, created_at "
+            "SELECT id, session_id, sequence, node, detail, level, provider, created_at, "
+            "started_at, duration_ms, tokens_in, tokens_out, cost_usd "
             "FROM trace_events WHERE session_id = %s ORDER BY sequence",
             (session_id,),
         ).fetchall()

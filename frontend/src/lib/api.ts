@@ -150,9 +150,21 @@ export async function fetchReadiness(signal?: AbortSignal): Promise<ReadinessRes
  * made, no task yet) -> 'running' (mid-graph, only ever observed WITHIN a
  * request/response cycle since every mutating call is synchronous) ->
  * 'awaiting_approval' (paused on an irreversible step, ADR-016) <->
- * 'running' again on resume -> 'done' | 'failed'.
+ * 'running' again on resume -> 'done' | 'degraded' | 'failed'.
+ *
+ * 'degraded' is terminal and answer-bearing like 'done': the plan ran, but no
+ * provider returned an answer that passed the backend's answer-quality check,
+ * so what's shown is a deterministic report built from the tool results rather
+ * than a model summary. It is deliberately NOT folded into 'done' — a fallback
+ * that reads as a clean success is the bug this status exists to make visible.
  */
-export type SessionStatus = 'created' | 'running' | 'awaiting_approval' | 'done' | 'failed'
+export type SessionStatus =
+  | 'created'
+  | 'running'
+  | 'awaiting_approval'
+  | 'done'
+  | 'degraded'
+  | 'failed'
 
 export interface PendingAction {
   id: string
@@ -188,6 +200,20 @@ export interface TraceEvent {
   level: 'info' | 'success' | 'warning' | 'error'
   provider: string | null
   created_at: string
+  /**
+   * P3 observability fields. All null for events emitted before P3 shipped,
+   * and for nodes (approval_gate) that deliberately don't measure duration —
+   * see `app/graph/nodes.py`'s `approval_gate_node` docstring. Render a
+   * missing value as "—", never "0ms" / "$0.00": the pre-P3 sessions ran in
+   * real time, they just weren't measured, and that is a different fact
+   * than "instant" or "free".
+   */
+  started_at: string | null
+  duration_ms: number | null
+  tokens_in: number | null
+  tokens_out: number | null
+  /** A decimal string (e.g. "0.000123"), not a float — see TraceEvent in state.py. */
+  cost_usd: string | null
 }
 
 /**

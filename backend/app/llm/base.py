@@ -37,6 +37,20 @@ class ToolCallRequest(BaseModel):
 
 
 @dataclass(frozen=True)
+class TokenUsage:
+    """Token counts for one `generate()` call, when the provider reports them.
+
+    LangChain populates `AIMessage.usage_metadata` for both integrations this
+    project uses (verified against the installed packages — see
+    `llm_response_from_ai_message`), so this is captured once here rather
+    than per-provider.
+    """
+
+    input_tokens: int
+    output_tokens: int
+
+
+@dataclass(frozen=True)
 class LLMResponse:
     """A provider's answer, normalized regardless of which one produced it.
 
@@ -44,11 +58,18 @@ class LLMResponse:
     "openrouter") — this is what makes a failover visible to a caller (and,
     from Day 3, to the trace log) without the caller needing to know which
     provider it asked.
+
+    `usage` and `model` are `None` when the provider omits them (a fake test
+    double, or a real provider that doesn't report usage for some call
+    shape) — every existing caller and test double that builds an
+    `LLMResponse` without these two fields keeps working unchanged.
     """
 
     content: str
     tool_calls: list[ToolCallRequest]
     provider: str
+    usage: TokenUsage | None = None
+    model: str | None = None
 
 
 @runtime_checkable
@@ -75,7 +96,19 @@ def llm_response_from_ai_message(ai_message: AIMessage, *, provider: str) -> LLM
         ToolCallRequest(id=tc["id"], name=tc["name"], arguments=tc["args"])
         for tc in ai_message.tool_calls
     ]
-    return LLMResponse(content=content, tool_calls=tool_calls, provider=provider)
+    usage_metadata = ai_message.usage_metadata
+    usage = (
+        TokenUsage(
+            input_tokens=usage_metadata.get("input_tokens", 0),
+            output_tokens=usage_metadata.get("output_tokens", 0),
+        )
+        if usage_metadata is not None
+        else None
+    )
+    model = ai_message.response_metadata.get("model_name")
+    return LLMResponse(
+        content=content, tool_calls=tool_calls, provider=provider, usage=usage, model=model
+    )
 
 
 def ai_message_from_llm_response(response: LLMResponse) -> AIMessage:

@@ -12,10 +12,16 @@ assumed.
 from __future__ import annotations
 
 from app.graph.build import build_graph
-from app.graph.limits import MAX_REPLANS, MAX_STEP_RETRIES, MAX_TOOL_CALLS
+from app.graph.limits import MAX_PLANNING_ROUNDS, MAX_STEP_RETRIES, MAX_TOOL_CALLS
+from app.graph.nodes import decide_next_node
 from app.graph.state import initial_state
 from app.llm.base import LLMResponse, ToolCallRequest
 from app.tools.errors import ToolError
+
+# P2: a completed plan now routes through `verify` before `finalize`, so
+# every scripted sequence below that used to end "...tool call, finalize"
+# needs a verify response (DONE, no tool calls) inserted between the two.
+_VERIFY_DONE = LLMResponse(content="DONE", tool_calls=[], provider="gemini")
 
 
 class _ScriptedTool:
@@ -73,7 +79,12 @@ def test_transient_tool_failure_retries_the_same_step_then_succeeds() -> None:
                 ],
                 provider="gemini",
             ),
-            LLMResponse(content="final", tool_calls=[], provider="gemini"),
+            _VERIFY_DONE,
+            LLMResponse(
+                content="The step completed and returned its result.",
+                tool_calls=[],
+                provider="gemini",
+            ),
         ]
     )
     graph = build_graph(llm, tools, langchain_tools=[])
@@ -83,7 +94,7 @@ def test_transient_tool_failure_retries_the_same_step_then_succeeds() -> None:
     assert calc.calls == [{"expression": "2+2"}, {"expression": "2+2"}]
     assert result["status"] == "done"
     assert result["replans"] == 0  # pure retry — planner was never re-invoked
-    assert len(llm.calls) == 2  # planner once, finalize once
+    assert len(llm.calls) == 3  # planner once, verify once, finalize once
     retry_events = [
         e for e in result["trace"] if e["node"] == "decide_next" and "retry" in e["detail"]
     ]
@@ -112,7 +123,12 @@ def test_permanent_tool_failure_skips_retry_and_replans_immediately() -> None:
                 tool_calls=[ToolCallRequest(id="c2", name="web_search", arguments={"query": "x"})],
                 provider="gemini",
             ),
-            LLMResponse(content="final", tool_calls=[], provider="gemini"),
+            _VERIFY_DONE,
+            LLMResponse(
+                content="The step completed and returned its result.",
+                tool_calls=[],
+                provider="gemini",
+            ),
         ]
     )
     graph = build_graph(llm, tools, langchain_tools=[])
@@ -150,7 +166,12 @@ def test_unexpected_tool_exception_is_sanitized_and_replanned() -> None:
                 tool_calls=[ToolCallRequest(id="c2", name="web_search", arguments={"query": "x"})],
                 provider="gemini",
             ),
-            LLMResponse(content="final", tool_calls=[], provider="gemini"),
+            _VERIFY_DONE,
+            LLMResponse(
+                content="The step completed and returned its result.",
+                tool_calls=[],
+                provider="gemini",
+            ),
         ]
     )
 
@@ -164,14 +185,14 @@ def test_unexpected_tool_exception_is_sanitized_and_replanned() -> None:
     assert "unexpected calculator failure" in trace_text
 
 
-def test_transient_failures_exhaust_retries_then_replan_then_give_up() -> None:
-    """The full escalation path: retry the step (MAX_STEP_RETRIES times) ->
-    re-plan (once, MAX_REPLANS) -> the new step also keeps failing -> give up.
-    """
+def test_transient_retries_exhausted_falls_through_to_replan_then_succeeds() -> None:
+    """Once a transient failure has consumed all MAX_STEP_RETRIES retries on
+    the same step, decide_next falls through to re-planning exactly like a
+    permanent failure would — retryability, not failure kind alone, gates
+    the retry branch."""
     calc_outcomes = [ToolError(f"blip{i}", transient=True) for i in range(MAX_STEP_RETRIES + 1)]
-    web_outcomes = [ToolError(f"blip{i}", transient=True) for i in range(MAX_STEP_RETRIES + 1)]
     calc = _ScriptedTool("calculator", calc_outcomes)
-    web = _ScriptedTool("web_search", web_outcomes)
+    web = _ScriptedTool("web_search", ["found: x"])
     tools = {"calculator": calc, "web_search": web, "notes_store": _empty_tool("notes_store")}
     llm = _ScriptedLLM(
         [
@@ -187,6 +208,8 @@ def test_transient_failures_exhaust_retries_then_replan_then_give_up() -> None:
                 tool_calls=[ToolCallRequest(id="c2", name="web_search", arguments={"query": "q"})],
                 provider="gemini",
             ),
+            _VERIFY_DONE,
+            LLMResponse(content="Recovered via re-plan.", tool_calls=[], provider="gemini"),
         ]
     )
     graph = build_graph(llm, tools, langchain_tools=[])
@@ -194,13 +217,32 @@ def test_transient_failures_exhaust_retries_then_replan_then_give_up() -> None:
     result = graph.invoke(initial_state("flaky task"))
 
     assert len(calc.calls) == MAX_STEP_RETRIES + 1
-    assert len(web.calls) == MAX_STEP_RETRIES + 1
-    assert result["replans"] == MAX_REPLANS
+    assert web.calls == [{"query": "q"}]
+    assert result["replans"] == 1
+    assert result["status"] == "done"
+    assert result["final_answer"] == "Recovered via re-plan."
+
+
+def test_replan_budget_fully_spent_gives_up_without_touching_the_hard_cap() -> None:
+    """Unit-level boundary check for the scenario above, generalized to the
+    FULL MAX_PLANNING_ROUNDS budget: constructing state at that boundary
+    directly rather than scripting 4 rounds of retry-exhaustion through the
+    full graph (see the previous test's docstring for why that would
+    overrun MAX_TOOL_CALLS before ever reaching this branch)."""
+    state = initial_state("flaky task")
+    state["plan"] = [ToolCallRequest(id="c1", name="calculator", arguments={"expression": "1/1"})]
+    state["step_index"] = 0
+    state["tool_calls_made"] = MAX_PLANNING_ROUNDS
+    state["replans"] = MAX_PLANNING_ROUNDS
+    state["last_failure"] = "blip"
+    state["last_failure_transient"] = False  # past MAX_STEP_RETRIES, or a permanent failure
+
+    result = decide_next_node(state)
+
+    assert result["next_action"] == "give_up"
     assert result["status"] == "failed"
-    assert f"blip{MAX_STEP_RETRIES}" in result["final_answer"]
-    assert (
-        result["tool_calls_made"] < MAX_TOOL_CALLS
-    ), "should give up on the replan budget, not the hard cap"
+    assert "blip" in result["final_answer"]
+    assert state["tool_calls_made"] < MAX_TOOL_CALLS, "gave up on the budget, not the hard cap"
 
 
 def test_hard_tool_call_cap_stops_a_long_plan_even_when_every_step_succeeds() -> None:
@@ -246,7 +288,12 @@ def test_a_plan_that_succeeds_on_exactly_its_max_tool_calls_th_step_still_finali
     llm = _ScriptedLLM(
         [
             LLMResponse(content="", tool_calls=plan, provider="gemini"),
-            LLMResponse(content="all done", tool_calls=[], provider="gemini"),
+            _VERIFY_DONE,
+            LLMResponse(
+                content="All planned steps completed successfully.",
+                tool_calls=[],
+                provider="gemini",
+            ),
         ]
     )
     graph = build_graph(llm, tools, langchain_tools=[])
@@ -255,7 +302,7 @@ def test_a_plan_that_succeeds_on_exactly_its_max_tool_calls_th_step_still_finali
 
     assert len(calc.calls) == MAX_TOOL_CALLS
     assert result["status"] == "done"
-    assert result["final_answer"] == "all done"
+    assert result["final_answer"] == "All planned steps completed successfully."
     cap_events = [e for e in result["trace"] if "safety cap" in e["detail"]]
     assert cap_events == []
 
@@ -284,7 +331,12 @@ def test_unknown_tool_selection_is_treated_as_a_permanent_failure_and_replans() 
                 tool_calls=[ToolCallRequest(id="c2", name="web_search", arguments={"query": "x"})],
                 provider="gemini",
             ),
-            LLMResponse(content="final", tool_calls=[], provider="gemini"),
+            _VERIFY_DONE,
+            LLMResponse(
+                content="The step completed and returned its result.",
+                tool_calls=[],
+                provider="gemini",
+            ),
         ]
     )
     graph = build_graph(llm, tools, langchain_tools=[])

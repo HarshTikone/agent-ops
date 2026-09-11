@@ -13,6 +13,11 @@ function event(overrides: Partial<TraceEvent>): TraceEvent {
     level: 'info',
     provider: null,
     created_at: '2026-08-24T00:00:00Z',
+    started_at: null,
+    duration_ms: null,
+    tokens_in: null,
+    tokens_out: null,
+    cost_usd: null,
     ...overrides,
   }
 }
@@ -97,6 +102,25 @@ describe('TraceViewer', () => {
     const items = screen.getAllByRole('listitem')
     expect(items[0]).toHaveAttribute('data-tone', 'success')
     expect(items[1]).toHaveAttribute('data-tone', 'success')
+  })
+
+  it('shows an em dash, not 0ms, when duration was not measured', () => {
+    render(<TraceViewer events={[event({ duration_ms: null })]} />)
+    expect(screen.getByText('—')).toBeInTheDocument()
+    expect(screen.queryByText('0ms')).not.toBeInTheDocument()
+  })
+
+  it('formats a sub-second duration in milliseconds and a longer one in seconds', () => {
+    render(
+      <TraceViewer
+        events={[
+          event({ id: 1, duration_ms: 420 }),
+          event({ id: 2, duration_ms: 1_800 }),
+        ]}
+      />,
+    )
+    expect(screen.getByText('420ms')).toBeInTheDocument()
+    expect(screen.getByText('1.8s')).toBeInTheDocument()
   })
 
   it('gives a retry decision a warning tone, distinct from an unrelated default event', () => {
