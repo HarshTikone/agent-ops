@@ -1656,3 +1656,208 @@ domain allowlist and discard off-domain results.
   operations must rerun the release check after rotating provider credentials.
 - Strict official-domain searches can return no answer rather than silently
   falling back to convenient third-party material.
+
+---
+
+## ADR-026: `degraded` — a fourth terminal status for an answer that ran but wasn't validated
+
+**Date:** 2026-09-11 (P0/P1 remediation)
+
+**Context**
+
+`scripts/audit_sessions.py`'s first run against production found `done`
+sessions holding an empty `final_answer` or raw `<tool_call>` markup — the
+assumption that `status == "done"` meant "this answer is usable" had
+quietly stopped being true. `sessions.status`'s CHECK constraint (migration
+0001) only allowed `running | awaiting_approval | done | failed`; there was
+no status for "the plan executed correctly, but no provider returned a
+valid summary."
+
+**Decision**
+
+Add `degraded`: terminal and answer-bearing like `done` — the session
+completed its plan and carries a real, displayable answer — but distinct
+from `done` because that answer is the deterministic fallback built from
+tool results (`_fallback_answer` in `app/graph/nodes.py`), not a validated
+model summary. `failed` stays reserved for runs where the work itself did
+not complete. Migration `0005_degraded_session_status.sql` widens the CHECK
+constraint; both `scripts/audit_sessions.py`'s `ANSWER_BEARING_STATUSES`
+and `session_runner._apply_result`'s own `("done", "degraded")` check treat
+the two statuses identically for persistence and grading, which is what
+keeps a fallback from being silently counted as a clean success anywhere in
+the system, present or future.
+
+**What we gave up**
+
+- A third status is one more value every consumer (the audit script, the
+  UI's `StatusBadge`, any future dashboard) has to handle explicitly rather
+  than treating `done` as the only success state — the alternative
+  (silently reusing `done`) is the exact bug this status exists to make
+  impossible.
+- `degraded` sessions still require a human to notice and investigate why
+  no provider produced a valid summary; this status makes the failure mode
+  visible and countable, it does not fix the underlying provider issue.
+
+---
+
+## ADR-027: `finalize` validates its own output before reporting `done`
+
+**Date:** 2026-09-11 (P0/P1 remediation)
+
+**Context**
+
+Production shipped `done` sessions with an empty answer and one with raw
+`<tool_call>` markup as the user-facing text — four historical sessions,
+confirmed by `scripts/audit_sessions.py`'s baseline run (18 answer-bearing
+sessions, 4 unusable). `FailoverProvider` (ADR-002) only catches
+`TransientProviderError`; an empty or markup-bearing body arrives as a
+perfectly successful HTTP 200, so nothing between the provider and the
+trace log ever had a chance to notice.
+
+**Decision**
+
+`app/answer_quality.validate_answer(text) -> str | None` is the single
+shared rule set (not empty, no tool-call markup, at least
+`MIN_ANSWER_CHARS` characters) used by both the runtime guard and the
+offline audit — a second, drifting copy of the rules would reintroduce
+exactly the class of mistake this fixes. `make_finalize_node` tries the
+primary provider, and only if `validate_answer` rejects its answer does it
+retry on a *different* provider (`FailoverProvider.swapped()`, since the
+retry must not silently repeat the same provider's own failure mode). If
+neither provider returns a valid answer, the session reports `degraded`
+(ADR-026) with the deterministic fallback instead of a synthesized one. The
+rejection is still traced at `level="warning"` even when the retry
+succeeds, so a near-miss stays visible rather than being quietly papered
+over. The invariant this node now holds: it never reports `done` without a
+validated answer, and never stamps `level="success"` on an answer it
+rejected.
+
+Verified in `tests/test_graph_finalize.py` (acceptance, rejection-then-retry,
+and degrade-with-no-retry-provider paths) and `tests/test_answer_quality.py`
+(the three rules in isolation).
+
+**What we gave up**
+
+- `MIN_ANSWER_CHARS = 12` is a judgment call, not a rule driven by a
+  specific production failure — it broke 10 existing tests whose finalize
+  stubs were unrealistic placeholders (`content="final"`), which had to be
+  rewritten to real sentences. It is a one-line reversal if it proves too
+  aggressive once more production traffic exists.
+- A finalize call now costs up to two provider round trips instead of one
+  on the rejection path, and — once retried — a still-invalid answer
+  degrades rather than trying a third time; two providers is what this
+  system has.
+
+---
+
+## ADR-028: `verify` — a real node that decides whether the task is actually done
+
+**Date:** 2026-09-11 (P2 remediation)
+
+**Context**
+
+`decide_next_node` (ADR-012) routed straight to `finalize` the moment the
+current plan ran out of steps — "plan exhausted" and "task complete" were
+treated as the same fact. Once ADR-029's iterative planning made a "plan"
+just one tool call at a time, that assumption broke completely: a run would
+finalize after the *first* tool call regardless of whether the task needed
+more.
+
+**Decision**
+
+Insert `verify` between `decide_next` and `finalize`. Given the
+conversation so far, it asks the same `llm.generate()` interface (no new
+provider method) a single question — is the task complete? — parsing a
+`DONE` / `CONTINUE: <guidance>` response. `DONE` proceeds to `finalize`;
+`CONTINUE` appends the guidance as a `HumanMessage` and routes back to
+`planner` via the same `"replan"` edge `decide_next` already used for a
+failed, un-retryable step (`route_after_verify`, `app/graph/build.py`) —
+the machinery already existed, `verify` just makes it the normal path
+instead of a failure-only one. It is a real node, not an `if` folded into
+`decide_next`, for the same reason `decide_next` itself is a node
+(ADR-012): it emits its own trace event, so a viewer watches the agent
+decide "not done yet" as it happens — ARCHITECTURE.md's "the trace is the
+product" thesis applied to the planning loop, not just tool execution.
+
+Bounded by `MAX_PLANNING_ROUNDS` (ADR-023's limits module), checked inside
+`verify` itself: a task the tools genuinely cannot satisfy must give up
+once this budget is spent, not spin all the way to `MAX_TOOL_CALLS` first —
+a `verify` node that always answers "not done" is otherwise an infinite
+loop with no budget of its own.
+
+Verified in `tests/test_graph_verify.py`: a three-tool-call task takes
+exactly 7 LLM calls (3 planner + 3 verify + 1 finalize, matching the
+pre-deploy cost estimate), a single-tool task adds no extra planning round,
+and an always-"not done" task gives up within `MAX_PLANNING_ROUNDS` well
+under `MAX_TOOL_CALLS`. Confirmed against real Gemini/OpenRouter on the
+commit deployed 2026-09-11: the three production fixture tasks each
+completed with a valid `done` answer — three tool calls for the multi-step
+task, two for the write/read-back task, no extra planning round for the
+single-tool task — and a separate live run surfaced a genuine Gemini 503
+mid-run, which failed over to OpenRouter correctly inside `verify`'s own
+call.
+
+**What we gave up**
+
+- Every tool-using run now costs one additional LLM call (`verify`) it
+  didn't before, even a single-step task that was already complete — P3's
+  cost/latency capture on the same commit is what makes this a measured
+  tradeoff instead of a hopeful one.
+- `verify`'s judgment is itself an LLM call, and can be wrong in both
+  directions (declaring an incomplete task done, or looping an already-done
+  task); `MAX_PLANNING_ROUNDS` bounds the cost of the second failure mode —
+  nothing bounds the first beyond `finalize`'s own answer validation
+  (ADR-027) catching an obviously-incomplete answer.
+
+---
+
+## ADR-029: Iterative single-tool-per-turn planning replaces upfront multi-step planning
+
+**Date:** 2026-09-11 (P2 remediation)
+
+**Context**
+
+`PLANNER_SYSTEM_PROMPT` asked the model to "break the task into the minimum
+sequence of tool calls needed... each tool call you make becomes one step,"
+silently depending on reliable parallel tool-calling in one turn. Gemini and
+most OpenRouter models emit one call per turn. Every multi-step task
+therefore collapsed to a single-step plan — confirmed against source, not
+inferred: two of the four production failures found by
+`scripts/audit_sessions.py` were multi-step tasks ("compute, then save,
+then read back"; "write a key, then read it back") whose persisted plan was
+a single tool call, not several.
+
+**Decision**
+
+Rejected: asking for a structured JSON plan array via
+`with_structured_output`. It requires a new method on the `LLMProvider`
+Protocol, rippling into `GeminiProvider`, `OpenRouterProvider`,
+`FailoverProvider`, and every test double in the suite — and it still
+cannot fix the real blocker, since a read-back step's arguments depend on
+whether the preceding write succeeded, which an upfront plan cannot know.
+
+Chosen instead: stop asking the planner to plan ahead at all.
+`PLANNER_SYSTEM_PROMPT` now asks for the single next tool call given
+everything that has happened so far — the one-call-per-turn shape these
+models already reliably produce, rather than fighting it. `verify`
+(ADR-028) is what turns a sequence of single-tool rounds back into a
+finished multi-step task, deciding after each tool call whether more work
+remains and routing back to `planner` with guidance when it does.
+
+Verified end-to-end, including live against real Gemini/OpenRouter on the
+deployed commit (2026-09-11): the exact "compute → save → read back"
+production failure now executes three separate tool calls across three
+planner rounds and returns the correct read-back value, and "write key →
+read it back" returns the stored value rather than stopping after the
+write.
+
+**What we gave up**
+
+- The planner can no longer front-load a whole task's worth of context into
+  one plan the way a hypothetical perfect multi-call turn could; each round
+  only sees the instruction `verify` just gave it plus the full message
+  history, not a pre-committed roadmap.
+- A run's total planner+verify LLM call count now scales with the number of
+  tool calls the task needs (roughly two calls per step) rather than
+  staying fixed at two regardless of plan length — an explicit, measured
+  tradeoff against ADR-028's baseline, not an accidental one.
