@@ -361,3 +361,17 @@ backstop converts any unexpected adapter exception to a permanent step failure,
 logs a redacted traceback, and persists only a stable sanitized summary. The
 runtime backend image is multi-stage, non-root, migration-capable, and excludes
 builder tooling.
+
+## 12. Session archiving
+
+`sessions.archived_at` (ADR-030) is a nullable soft-delete flag, not a row
+deletion: `POST /sessions/{id}/archive` sets it, `.../restore` clears it, and
+`GET /sessions/{id}` ignores it entirely so an archived session's URL always
+still resolves. `GET /sessions` filters `WHERE archived_at IS NULL` by
+default; `?include_archived=true` lifts that filter for the same endpoint
+rather than adding a second route. Classification of *which* sessions to
+archive lives entirely in `scripts/archive_sessions.py` — a standalone,
+dry-run-by-default maintenance script in the same family as
+`scripts/migrate.py`, not a database trigger or an API-request-time check —
+so the judgment call of "is this a QA fixture" is reviewable as printed
+output before anything is written, with `--restore-all` as the undo.

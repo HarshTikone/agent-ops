@@ -87,6 +87,45 @@ def test_list_sessions_endpoint_returns_most_recent_first(db_pool) -> None:
             conn.execute("DELETE FROM sessions WHERE id IN (%s, %s)", (older["id"], newer["id"]))
 
 
+def test_archive_and_restore_session_through_the_real_api(db_pool) -> None:
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["id"]
+    try:
+        listed_before = client.get("/sessions").json()
+        assert any(s["id"] == session_id for s in listed_before)
+
+        archived = client.post(f"/sessions/{session_id}/archive")
+        assert archived.status_code == 200
+        assert archived.json()["archived_at"] is not None
+
+        listed_after_archive = client.get("/sessions").json()
+        assert not any(s["id"] == session_id for s in listed_after_archive)
+
+        listed_including_archived = client.get("/sessions?include_archived=true").json()
+        assert any(s["id"] == session_id for s in listed_including_archived)
+
+        # the session still opens directly by URL while archived
+        fetched = client.get(f"/sessions/{session_id}")
+        assert fetched.status_code == 200
+        assert fetched.json()["archived_at"] is not None
+
+        restored = client.post(f"/sessions/{session_id}/restore")
+        assert restored.status_code == 200
+        assert restored.json()["archived_at"] is None
+
+        listed_after_restore = client.get("/sessions").json()
+        assert any(s["id"] == session_id for s in listed_after_restore)
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+
+
+def test_archive_session_returns_404_when_missing() -> None:
+    client = TestClient(app)
+    response = client.post("/sessions/00000000-0000-0000-0000-000000000000/archive")
+    assert response.status_code == 404
+
+
 @pytest.mark.live
 def test_full_session_through_the_real_api_including_approval(db_pool) -> None:
     client = TestClient(app)

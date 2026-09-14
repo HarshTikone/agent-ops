@@ -1861,3 +1861,42 @@ write.
   tool calls the task needs (roughly two calls per step) rather than
   staying fixed at two regardless of plan length — an explicit, measured
   tradeoff against ADR-028's baseline, not an accidental one.
+
+---
+
+## ADR-030: Session archiving is a soft flag, not a delete, and its cleanup runs offline
+
+**Date:** 2026-09-14 (post-release housekeeping)
+
+**Context**
+
+Weeks of QA and interview fixtures (`qa_*`, `deep_qa_*`, `p2_verify_*`,
+`interview_*` task keys, blank `created` rows never messaged, and the literal
+`do something` smoke test) had accumulated on the live session list alongside
+genuine demo runs, with no way to tell them apart in the UI. `DELETE` was
+rejected outright: every session is linked evidence (trace, messages,
+approvals) that a URL should keep resolving to, and a hand-picked one-time
+delete has no audit trail if the judgment turns out wrong.
+
+**Decision**
+
+`sessions.archived_at` (nullable, `NULL` = visible) is set or cleared by
+`POST /sessions/{id}/archive` / `.../restore`. `GET /sessions` filters it out
+by default; `?include_archived=true` restores the full list; `GET
+/sessions/{id}` is unaffected either way, so a direct link never breaks.
+Classification is a standalone, dry-run-by-default script
+(`scripts/archive_sessions.py`) run against the fixture-naming conventions
+above rather than a database trigger or API-request-time check — the same
+shape as `scripts/migrate.py`, deliberately not part of API startup, with a
+`--restore-all` escape hatch for when the heuristic is wrong.
+
+**What we gave up**
+
+- The classifier is a naming-convention heuristic, not a formal QA/production
+  flag captured at session-creation time; a genuine session that happens to
+  contain `qa_` in its task text would be mis-archived (mitigated by the
+  dry-run plan being printed for review before `--apply`).
+- Archived rows are not actually removed, so the table keeps growing;
+  this trades storage for the audit trail every session's trace represents.
+- No scheduled job runs the archiver — it stays a manual, reviewed step
+  after each deploy that adds fixture noise, not an automatic sweep.

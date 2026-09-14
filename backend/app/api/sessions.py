@@ -65,9 +65,11 @@ def create_session(request: Request, pool: DbPool = Depends(get_db_pool)) -> dic
 
 @router.get("/sessions", response_model=list[SessionResponse])
 def list_sessions(
-    limit: int = Depends(validate_session_limit), pool: DbPool = Depends(get_db_pool)
+    limit: int = Depends(validate_session_limit),
+    include_archived: bool = False,
+    pool: DbPool = Depends(get_db_pool),
 ) -> list[dict[str, Any]]:
-    return repo.list_sessions(pool, limit=limit)
+    return repo.list_sessions(pool, limit=limit, include_archived=include_archived)
 
 
 @router.get("/sessions/{session_id}", response_model=SessionResponse)
@@ -150,6 +152,38 @@ def send_message(
     if completed is None:
         raise HTTPException(status_code=404, detail="session was deleted while the run completed")
     return session_with_pending_action(pool, completed)
+
+
+@router.post(
+    "/sessions/{session_id}/archive",
+    response_model=SessionResponse,
+    dependencies=[Depends(require_operator_key)],
+)
+@limiter.limit("20/minute")
+def archive_session(
+    request: Request, session_id: UUID, pool: DbPool = Depends(get_db_pool)
+) -> dict[str, Any]:
+    del request
+    archived = repo.archive_session(pool, session_id)
+    if archived is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    return session_with_pending_action(pool, archived)
+
+
+@router.post(
+    "/sessions/{session_id}/restore",
+    response_model=SessionResponse,
+    dependencies=[Depends(require_operator_key)],
+)
+@limiter.limit("20/minute")
+def restore_session(
+    request: Request, session_id: UUID, pool: DbPool = Depends(get_db_pool)
+) -> dict[str, Any]:
+    del request
+    restored = repo.restore_session(pool, session_id)
+    if restored is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    return session_with_pending_action(pool, restored)
 
 
 @router.get("/sessions/{session_id}/trace", response_model=list[TraceEventResponse])

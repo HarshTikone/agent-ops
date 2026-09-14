@@ -43,6 +43,10 @@ python -m scripts.migrate       # applies backend/migrations/*.sql — run once,
 uvicorn app.main:app --reload
 ```
 
+`python -m scripts.archive_sessions` prints which sessions its QA/demo-fixture
+heuristics would soft-archive, without changing anything; add `--apply` to
+archive them for real, or `--restore-all` to undo every archive in one shot.
+
 Set an `AGENT_OPS_API_KEY` containing at least 32 bytes, then check the service with
 `curl http://localhost:8000/health` and
 `curl http://localhost:8000/health/ready` (the second reports which of
@@ -56,6 +60,12 @@ live in Postgres — `POST /sessions`, `GET /sessions`,
 `GET /sessions/{id}/trace`, `POST /approvals/{id}/approve` /
 `.../reject`. See `/docs` for the full schema, or `ADR.md` (ADR-014/015/016)
 for how the approval pause survives across separate requests.
+
+Sessions can be soft-archived without deleting them: `POST
+/sessions/{id}/archive` / `.../restore` set or clear `archived_at`. `GET
+/sessions` excludes archived sessions by default; pass
+`?include_archived=true` to see everything. An archived session still opens
+directly by `GET /sessions/{id}`.
 
 Every `POST` requires `X-Agent-Ops-Key`. The frontend asks for that key at
 runtime and keeps it in `sessionStorage`; it is never a `VITE_*` value and is
@@ -134,6 +144,9 @@ Release order:
    `docker run --rm --env-file .env agent-ops-backend:release python -m scripts.migrate`.
    The runner holds a PostgreSQL advisory lock, records each applied filename,
    and is safe to repeat. It is deliberately not part of API startup.
+   After a deploy that adds `archived_at` (or any future soft-delete flag),
+   dry-run `docker run --rm --env-file .env agent-ops-backend:release python -m
+   scripts.archive_sessions`, read the printed plan, then re-run with `--apply`.
 3. With the same dashboard environment, actively verify database, Supabase,
    Gemini, Tavily, and the optional OpenRouter fallback:
    `docker run --rm --env-file .env agent-ops-backend:release python -m scripts.release_check`.

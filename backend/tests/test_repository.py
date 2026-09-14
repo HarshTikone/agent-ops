@@ -292,4 +292,50 @@ def test_deleting_a_session_cascades_to_children(db_pool) -> None:
 
     assert repo.get_session(db_pool, session["id"]) is None
     assert repo.list_messages(db_pool, session["id"]) == []
+
+
+def test_archive_session_sets_archived_at_and_hides_from_default_list(db_pool, session_row) -> None:
+    assert repo.get_session(db_pool, session_row["id"])["archived_at"] is None
+
+    archived = repo.archive_session(db_pool, session_row["id"])
+    assert archived["archived_at"] is not None
+
+    visible_ids = [s["id"] for s in repo.list_sessions(db_pool)]
+    assert session_row["id"] not in visible_ids
+
+    all_ids = [s["id"] for s in repo.list_sessions(db_pool, include_archived=True)]
+    assert session_row["id"] in all_ids
+
+
+def test_archive_session_is_idempotent(db_pool, session_row) -> None:
+    first = repo.archive_session(db_pool, session_row["id"])
+    second = repo.archive_session(db_pool, session_row["id"])
+    assert first["archived_at"] == second["archived_at"]
+
+
+def test_archive_session_returns_none_when_missing(db_pool) -> None:
+    assert repo.archive_session(db_pool, uuid.uuid4()) is None
+
+
+def test_restore_session_clears_archived_at(db_pool, session_row) -> None:
+    repo.archive_session(db_pool, session_row["id"])
+    restored = repo.restore_session(db_pool, session_row["id"])
+    assert restored["archived_at"] is None
+    assert session_row["id"] in [s["id"] for s in repo.list_sessions(db_pool)]
+
+
+def test_restore_session_on_unarchived_session_is_a_no_op(db_pool, session_row) -> None:
+    restored = repo.restore_session(db_pool, session_row["id"])
+    assert restored["archived_at"] is None
+
+
+def test_restore_session_returns_none_when_missing(db_pool) -> None:
+    assert repo.restore_session(db_pool, uuid.uuid4()) is None
+
+
+def test_list_sessions_for_maintenance_includes_archived(db_pool, session_row) -> None:
+    repo.archive_session(db_pool, session_row["id"])
+    rows = repo.list_sessions_for_maintenance(db_pool)
+    found = next(row for row in rows if row["id"] == session_row["id"])
+    assert found["archived_at"] is not None
     assert repo.list_trace_events(db_pool, session["id"]) == []

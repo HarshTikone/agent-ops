@@ -29,6 +29,7 @@ class SessionResponse(BaseModel):
     task: str
     status: str
     final_answer: str | None
+    archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
     # Populated only when status == "awaiting_approval" (ADR-015/ADR-018) —

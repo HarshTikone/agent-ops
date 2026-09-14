@@ -37,7 +37,7 @@ def create_session(pool: DbPool, *, task: str = "") -> dict[str, Any]:
             return _required_row(
                 conn.execute(
                     "INSERT INTO sessions (task, status) VALUES (%s, 'running') "
-                    "RETURNING id, task, status, final_answer, created_at, updated_at",
+                    "RETURNING id, task, status, final_answer, archived_at, created_at, updated_at",
                     (task,),
                 ).fetchone(),
                 operation="create session",
@@ -45,7 +45,7 @@ def create_session(pool: DbPool, *, task: str = "") -> dict[str, Any]:
         return _required_row(
             conn.execute(
                 "INSERT INTO sessions DEFAULT VALUES "
-                "RETURNING id, task, status, final_answer, created_at, updated_at"
+                "RETURNING id, task, status, final_answer, archived_at, created_at, updated_at"
             ).fetchone(),
             operation="create session",
         )
@@ -61,7 +61,7 @@ def start_session(pool: DbPool, session_id: UUID, *, task: str) -> dict[str, Any
             """
             UPDATE sessions SET task = %s, status = 'running', updated_at = now()
             WHERE id = %s AND status = 'created'
-            RETURNING id, task, status, final_answer, created_at, updated_at
+            RETURNING id, task, status, final_answer, archived_at, created_at, updated_at
             """,
             (task, session_id),
         ).fetchone()
@@ -70,24 +70,32 @@ def start_session(pool: DbPool, session_id: UUID, *, task: str) -> dict[str, Any
 def get_session(pool: DbPool, session_id: UUID) -> dict[str, Any] | None:
     with pool.connection() as conn:
         return conn.execute(
-            "SELECT id, task, status, final_answer, created_at, updated_at "
+            "SELECT id, task, status, final_answer, archived_at, created_at, updated_at "
             "FROM sessions WHERE id = %s",
             (session_id,),
         ).fetchone()
 
 
-def list_sessions(pool: DbPool, *, limit: int = 50) -> list[dict[str, Any]]:
+def list_sessions(
+    pool: DbPool, *, limit: int = 50, include_archived: bool = False
+) -> list[dict[str, Any]]:
     """Most recently created first — Day 4's session list (ADR-015 flagged
     this as deferred until the UI shape was known; it's a plain list, no
-    pagination cursor, which is all a single-page session list needs)."""
+    pagination cursor, which is all a single-page session list needs).
+
+    Excludes archived sessions by default so QA/demo fixtures don't crowd
+    out real activity; `include_archived` is a fixed boolean flag interpolated
+    into the query, never user input, so it carries no injection risk."""
+    where_clause = "" if include_archived else "WHERE s.archived_at IS NULL"
     with pool.connection() as conn:
         return conn.execute(
-            """
+            f"""
             SELECT
                 s.id,
                 s.task,
                 s.status,
                 s.final_answer,
+                s.archived_at,
                 s.created_at,
                 s.updated_at,
                 CASE WHEN pa.id IS NULL THEN NULL ELSE jsonb_build_object(
@@ -108,11 +116,52 @@ def list_sessions(pool: DbPool, *, limit: int = 50) -> list[dict[str, Any]]:
                 ORDER BY created_at DESC
                 LIMIT 1
             ) AS pa ON TRUE
+            {where_clause}
             ORDER BY s.created_at DESC
             LIMIT %s
             """,
             (limit,),
         ).fetchall()
+
+
+def list_sessions_for_maintenance(pool: DbPool) -> list[dict[str, Any]]:
+    """Every session, unpaginated and including archived ones -- for offline
+    maintenance scripts (archiving, stranded-session reaping) that need the
+    full table rather than the API's paginated, unarchived-by-default view."""
+    with pool.connection() as conn:
+        return conn.execute(
+            "SELECT id, task, status, archived_at, created_at, updated_at "
+            "FROM sessions ORDER BY created_at"
+        ).fetchall()
+
+
+def archive_session(pool: DbPool, session_id: UUID) -> dict[str, Any] | None:
+    """Idempotent: archiving an already-archived session leaves its original
+    archived_at timestamp untouched rather than bumping it. None means the
+    session doesn't exist."""
+    with pool.connection() as conn:
+        return conn.execute(
+            """
+            UPDATE sessions SET archived_at = COALESCE(archived_at, now()), updated_at = now()
+            WHERE id = %s
+            RETURNING id, task, status, final_answer, archived_at, created_at, updated_at
+            """,
+            (session_id,),
+        ).fetchone()
+
+
+def restore_session(pool: DbPool, session_id: UUID) -> dict[str, Any] | None:
+    """Idempotent: restoring a session that isn't archived is a no-op
+    success. None means the session doesn't exist."""
+    with pool.connection() as conn:
+        return conn.execute(
+            """
+            UPDATE sessions SET archived_at = NULL, updated_at = now()
+            WHERE id = %s
+            RETURNING id, task, status, final_answer, archived_at, created_at, updated_at
+            """,
+            (session_id,),
+        ).fetchone()
 
 
 def update_session_status(
