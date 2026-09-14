@@ -292,6 +292,7 @@ def test_deleting_a_session_cascades_to_children(db_pool) -> None:
 
     assert repo.get_session(db_pool, session["id"]) is None
     assert repo.list_messages(db_pool, session["id"]) == []
+    assert repo.list_trace_events(db_pool, session["id"]) == []
 
 
 def test_archive_session_sets_archived_at_and_hides_from_default_list(db_pool, session_row) -> None:
@@ -338,4 +339,3 @@ def test_list_sessions_for_maintenance_includes_archived(db_pool, session_row) -
     rows = repo.list_sessions_for_maintenance(db_pool)
     found = next(row for row in rows if row["id"] == session_row["id"])
     assert found["archived_at"] is not None
-    assert repo.list_trace_events(db_pool, session["id"]) == []
