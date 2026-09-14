@@ -23,6 +23,7 @@ def _session() -> dict:
         "task": "",
         "status": "created",
         "final_answer": None,
+        "archived_at": None,
         "created_at": now,
         "updated_at": now,
     }
