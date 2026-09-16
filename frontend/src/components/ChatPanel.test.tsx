@@ -158,9 +158,9 @@ describe('ChatPanel', () => {
   })
 
   describe('follow-up messages on a terminal session (ADR-030)', () => {
-    it.each(['done', 'degraded', 'failed'] as const)(
-      'shows a follow-up composer when the session is %s',
-      (status) => {
+    const restartableStatuses = ['done', 'degraded', 'failed'] as const
+    for (const status of restartableStatuses) {
+      it(`shows a follow-up composer when the session is ${status}`, () => {
         render(
           <ChatPanel
             session={makeSession({ status, task: 'first task', final_answer: 'first answer' })}
@@ -170,12 +170,12 @@ describe('ChatPanel', () => {
           />,
         )
         expect(screen.getByLabelText(/send a follow-up/i)).toBeInTheDocument()
-      },
-    )
+      })
+    }
 
-    it.each(['running', 'awaiting_approval'] as const)(
-      'does not show a follow-up composer while %s',
-      (status) => {
+    const midFlightStatuses = ['running', 'awaiting_approval'] as const
+    for (const status of midFlightStatuses) {
+      it(`does not show a follow-up composer while ${status}`, () => {
         render(
           <ChatPanel
             session={makeSession({ status, task: 'first task' })}
@@ -185,15 +185,19 @@ describe('ChatPanel', () => {
           />,
         )
         expect(screen.queryByLabelText(/send a follow-up/i)).not.toBeInTheDocument()
-      },
-    )
+      })
+    }
 
     it('calls onSendMessage with the trimmed follow-up draft on submit', async () => {
       const user = userEvent.setup()
       const onSendMessage = vi.fn()
       render(
         <ChatPanel
-          session={makeSession({ status: 'done', task: 'first task', final_answer: 'first answer' })}
+          session={makeSession({
+            status: 'done',
+            task: 'first task',
+            final_answer: 'first answer',
+          })}
           onSendMessage={onSendMessage}
           submitting={false}
           error={null}
