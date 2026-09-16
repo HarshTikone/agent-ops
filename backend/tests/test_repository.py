@@ -84,13 +84,24 @@ def test_restart_session_moves_a_terminal_status_to_running_and_sets_new_task(
 
 @pytest.mark.parametrize("non_terminal_status", ["created", "running", "awaiting_approval"])
 def test_restart_session_fails_on_a_non_terminal_status(db_pool, non_terminal_status) -> None:
-    session = repo.create_session(db_pool, task="first task")
+    """WP4 (Sprint 04) caught this test lying about its own "created" case:
+    `create_session(..., task="first task")` starts a session `'running'`,
+    never `'created'` -- with a non-blank task always given, the
+    `non_terminal_status != "created"` guard below meant the "created"
+    parametrization silently exercised 'running' a second time instead. A
+    blank-task session is what actually starts `'created'`."""
+    session = repo.create_session(db_pool)
     if non_terminal_status != "created":
         repo.update_session_status(db_pool, session["id"], status=non_terminal_status)
+    before = repo.get_session(db_pool, session["id"])
+    assert before["status"] == non_terminal_status  # the setup actually reached this status
+
     restarted = repo.restart_session(db_pool, session["id"], task="second task")
     try:
         assert restarted is None
-        assert repo.get_session(db_pool, session["id"])["task"] == "first task"
+        after = repo.get_session(db_pool, session["id"])
+        assert after["status"] == non_terminal_status
+        assert after["task"] == before["task"]
     finally:
         with db_pool.connection() as conn:
             conn.execute("DELETE FROM sessions WHERE id = %s", (session["id"],))

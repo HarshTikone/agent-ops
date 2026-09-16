@@ -1901,6 +1901,16 @@ shape as `scripts/migrate.py`, deliberately not part of API startup, with a
 - No scheduled job runs the archiver — it stays a manual, reviewed step
   after each deploy that adds fixture noise, not an automatic sweep.
 
+**Mutation check (ADR-007 standard, backfilled 2026-09-16, Sprint 04 WP4)**
+
+- Removed the `WHERE s.archived_at IS NULL` filter from `list_sessions`
+  (replaced with an unconditional empty clause): `test_archive_session_sets_archived_at_and_hides_from_default_list`
+  failed (the archived session stayed visible in the default list).
+  Restored, passes.
+- Made `archive_reason` always return `None`: `test_blank_task_is_archived_as_untitled`,
+  `test_do_something_is_archived_as_smoke_test`, and `test_qa_prefixed_task_is_a_qa_fixture`
+  all failed. Restored, all three pass.
+
 ---
 
 ## ADR-031: Stranded sessions are reaped by a script, not a startup sweep
@@ -1946,6 +1956,17 @@ and reaping it would silently kill a pending approval.
   process is dead," so the threshold is a proxy for the latter, not proof.
   Closed by ADR-035, which also closes the separate read-then-write race
   this ADR's own writes had no guard against.
+
+**Mutation check (ADR-007 standard, backfilled 2026-09-16, Sprint 04 WP4)**
+
+- Changed `reap_action`'s running-session comparison from `stalled_for >=
+  RUNNING_STALE_AFTER` to `>`: `test_running_session_stalled_past_threshold_is_failed`
+  failed (a session exactly at the threshold, the test's own boundary case,
+  stopped being reaped). Restored, passes.
+- Made `reap_action` treat `awaiting_approval` the same as `running`:
+  `test_awaiting_approval_is_never_touched_no_matter_how_old` failed (a
+  year-old `awaiting_approval` session started getting reaped). Restored,
+  passes.
 
 ---
 
@@ -2060,6 +2081,27 @@ no-ops and only the new ones land.
   future work, not required for a follow-up message to work correctly.
   Superseded in part by ADR-034 for how the trace itself stays correct
   across turns.
+
+**Mutation check (ADR-007 standard, backfilled 2026-09-16, Sprint 04 WP4)**
+
+- Removed `continue_session_run`'s `if prior else initial_state(task)`
+  fallback (always calling `resumed_state` even against an empty `prior`):
+  `test_add_message_failure_leaves_session_failed_not_stuck` failed with
+  `KeyError: 'messages'` inside `resumed_state` — the exact original bug
+  this fallback was written to fix (see the "empty prior" note above).
+  Restored, passes.
+- Added `'running'` to `restart_session`'s `status IN (...)` list: this
+  surfaced a real bug in the test meant to catch it, not just in the
+  mutant. `test_restart_session_fails_on_a_non_terminal_status`'s
+  `[created]` case called `repo.create_session(db_pool, task="first
+  task")` — which, with a non-blank task, starts a session `'running'`,
+  never `'created'` — so that parametrization was silently exercising
+  `'running'` a second time instead of `'created'` at all. Fixed to create
+  a blank-task session (the only way `create_session` actually produces
+  `'created'`) and to assert the setup reached the intended status before
+  testing the mutant. With the fix: the mutant made `[running]` fail as
+  expected, while `[created]`/`[awaiting_approval]` correctly kept passing.
+  Restored, all three pass.
 
 ---
 
