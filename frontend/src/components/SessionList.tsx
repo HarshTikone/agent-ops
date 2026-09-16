@@ -54,7 +54,11 @@ export function SessionList({
           >
             <span className="card-kicker pr-[28px]">SESSION · {shortId(session.id)}</span>
             <h2 className="card-title flex-1">
-              {session.task || <span className="text-muted italic">Untitled session</span>}
+              {/* `title` is stable across follow-up turns (WP5, ADR-036);
+                  `task` is what a brand-new session shows before it has one. */}
+              {session.title || session.task || (
+                <span className="text-muted italic">Untitled session</span>
+              )}
             </h2>
             <span className="card-meta">
               <StatusBadge status={session.status} />

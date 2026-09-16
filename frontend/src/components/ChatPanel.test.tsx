@@ -2,12 +2,13 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ChatPanel } from './ChatPanel'
-import type { Session } from '../lib/api'
+import type { Message, Session } from '../lib/api'
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
     id: 's1',
     task: '',
+    title: null,
     status: 'created',
     final_answer: null,
     archived_at: null,
@@ -18,10 +19,27 @@ function makeSession(overrides: Partial<Session> = {}): Session {
   }
 }
 
+function makeMessage(overrides: Partial<Message> = {}): Message {
+  return {
+    id: 'm1',
+    session_id: 's1',
+    role: 'user',
+    content: '',
+    created_at: '2026-08-24T00:00:00Z',
+    ...overrides,
+  }
+}
+
 describe('ChatPanel', () => {
   it('shows a message form when the session has no task yet', () => {
     render(
-      <ChatPanel session={makeSession()} onSendMessage={vi.fn()} submitting={false} error={null} />,
+      <ChatPanel
+        session={makeSession()}
+        messages={[]}
+        onSendMessage={vi.fn()}
+        submitting={false}
+        error={null}
+      />,
     )
     expect(screen.getByLabelText(/what should the agent do/i)).toBeInTheDocument()
     expect(screen.getByLabelText(/what should the agent do/i)).toHaveFocus()
@@ -31,7 +49,13 @@ describe('ChatPanel', () => {
   it('disables Send until the draft has non-whitespace content', async () => {
     const user = userEvent.setup()
     render(
-      <ChatPanel session={makeSession()} onSendMessage={vi.fn()} submitting={false} error={null} />,
+      <ChatPanel
+        session={makeSession()}
+        messages={[]}
+        onSendMessage={vi.fn()}
+        submitting={false}
+        error={null}
+      />,
     )
     const button = screen.getByRole('button', { name: 'Send' })
     expect(button).toBeDisabled()
@@ -49,6 +73,7 @@ describe('ChatPanel', () => {
     render(
       <ChatPanel
         session={makeSession()}
+        messages={[]}
         onSendMessage={onSendMessage}
         submitting={false}
         error={null}
@@ -67,6 +92,7 @@ describe('ChatPanel', () => {
     render(
       <ChatPanel
         session={makeSession()}
+        messages={[]}
         onSendMessage={onSendMessage}
         submitting={false}
         error={null}
@@ -83,23 +109,39 @@ describe('ChatPanel', () => {
 
   it('matches the server-side 8,000 character limit', () => {
     render(
-      <ChatPanel session={makeSession()} onSendMessage={vi.fn()} submitting={false} error={null} />,
+      <ChatPanel
+        session={makeSession()}
+        messages={[]}
+        onSendMessage={vi.fn()}
+        submitting={false}
+        error={null}
+      />,
     )
     expect(screen.getByLabelText(/what should the agent do/i)).toHaveAttribute('maxlength', '8000')
   })
 
   it('shows a submitting state and disables the form while a message is in flight', () => {
     render(
-      <ChatPanel session={makeSession()} onSendMessage={vi.fn()} submitting={true} error={null} />,
+      <ChatPanel
+        session={makeSession()}
+        messages={[]}
+        onSendMessage={vi.fn()}
+        submitting={true}
+        error={null}
+      />,
     )
     expect(screen.getByRole('button', { name: 'Thinking…' })).toBeDisabled()
     expect(screen.getByLabelText(/what should the agent do/i)).toBeDisabled()
   })
 
-  it('shows the task and final answer once the session has run', () => {
+  it('shows the conversation once the session has run', () => {
     render(
       <ChatPanel
         session={makeSession({ status: 'done', task: 'what is 2+2?', final_answer: 'It is 4.' })}
+        messages={[
+          makeMessage({ id: 'm1', role: 'user', content: 'what is 2+2?' }),
+          makeMessage({ id: 'm2', role: 'assistant', content: 'It is 4.' }),
+        ]}
         onSendMessage={vi.fn()}
         submitting={false}
         error={null}
@@ -110,10 +152,35 @@ describe('ChatPanel', () => {
     expect(screen.queryByLabelText(/what should the agent do/i)).not.toBeInTheDocument()
   })
 
+  it('renders two turns as four message bubbles in order', () => {
+    render(
+      <ChatPanel
+        session={makeSession({ status: 'done', task: 'what is 3+3?', final_answer: 'It is 6.' })}
+        messages={[
+          makeMessage({ id: 'm1', role: 'user', content: 'what is 2+2?' }),
+          makeMessage({ id: 'm2', role: 'assistant', content: 'It is 4.' }),
+          makeMessage({ id: 'm3', role: 'user', content: 'what is 3+3?' }),
+          makeMessage({ id: 'm4', role: 'assistant', content: 'It is 6.' }),
+        ]}
+        onSendMessage={vi.fn()}
+        submitting={false}
+        error={null}
+      />,
+    )
+    expect(screen.getAllByText(/^(what is|It is)/)).toHaveLength(4)
+    expect(screen.getAllByText(/^(what is|It is)/).map((el) => el.textContent)).toEqual([
+      'what is 2+2?',
+      'It is 4.',
+      'what is 3+3?',
+      'It is 6.',
+    ])
+  })
+
   it('shows a thinking indicator when running with no answer yet', () => {
     render(
       <ChatPanel
         session={makeSession({ status: 'running', task: 'do something' })}
+        messages={[]}
         onSendMessage={vi.fn()}
         submitting={false}
         error={null}
@@ -126,6 +193,7 @@ describe('ChatPanel', () => {
     render(
       <ChatPanel
         session={makeSession({ status: 'awaiting_approval', task: 'save a note' })}
+        messages={[]}
         onSendMessage={vi.fn()}
         submitting={false}
         error={null}
@@ -138,6 +206,7 @@ describe('ChatPanel', () => {
     render(
       <ChatPanel
         session={makeSession()}
+        messages={[]}
         onSendMessage={vi.fn()}
         submitting={false}
         error="network blip"
@@ -150,6 +219,7 @@ describe('ChatPanel', () => {
     render(
       <ChatPanel
         session={makeSession({ status: 'awaiting_approval', task: 'save a note' })}
+        messages={[]}
         onSendMessage={vi.fn()}
         submitting={false}
         error="message response was interrupted"
@@ -165,6 +235,7 @@ describe('ChatPanel', () => {
         render(
           <ChatPanel
             session={makeSession({ status, task: 'first task', final_answer: 'first answer' })}
+            messages={[]}
             onSendMessage={vi.fn()}
             submitting={false}
             error={null}
@@ -180,6 +251,7 @@ describe('ChatPanel', () => {
         render(
           <ChatPanel
             session={makeSession({ status, task: 'first task' })}
+            messages={[]}
             onSendMessage={vi.fn()}
             submitting={false}
             error={null}
@@ -199,6 +271,7 @@ describe('ChatPanel', () => {
             task: 'first task',
             final_answer: 'first answer',
           })}
+          messages={[]}
           onSendMessage={onSendMessage}
           submitting={false}
           error={null}

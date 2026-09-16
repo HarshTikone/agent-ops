@@ -18,9 +18,11 @@ vi.mock('../lib/api', async () => {
 })
 
 function makeSession(overrides: Partial<Session> = {}): Session {
+  const task = overrides.task ?? 'a task'
   return {
     id: 's1',
-    task: 'a task',
+    task,
+    title: task,
     status: 'done',
     final_answer: 'an answer',
     archived_at: null,

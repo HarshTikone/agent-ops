@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
   approvePendingAction,
+  getMessages,
   getSession,
   getTrace,
   isValidSessionId,
   rejectPendingAction,
   sendMessage,
+  type Message,
   type Session,
   type TraceEvent,
 } from '../lib/api'
@@ -82,7 +84,14 @@ function RunTotals({ events }: { events: TraceEvent[] }) {
 type LoadState =
   | { state: 'loading' }
   | { state: 'error'; message: string }
-  | { state: 'loaded'; session: Session; trace: TraceEvent[]; traceError: string | null }
+  | {
+      state: 'loaded'
+      session: Session
+      trace: TraceEvent[]
+      traceError: string | null
+      messages: Message[]
+      messagesError: string | null
+    }
 
 type ActionKind = 'message' | 'approve' | 'reject' | null
 
@@ -108,20 +117,35 @@ export function SessionPage() {
     const coldStartTimer = window.setTimeout(() => setColdStart(true), 8_000)
     getSession(sessionId, controller.signal)
       .then(async (session) => {
-        try {
-          const trace = await getTrace(sessionId, controller.signal)
-          if (!controller.signal.aborted) {
-            setLoad({ state: 'loaded', session, trace, traceError: null })
-          }
-        } catch (error) {
-          if (isAbortError(error) || controller.signal.aborted) return
-          setLoad({
-            state: 'loaded',
-            session,
-            trace: [],
-            traceError: error instanceof Error ? error.message : 'Unknown trace error',
-          })
+        const [traceResult, messagesResult] = await Promise.allSettled([
+          getTrace(sessionId, controller.signal),
+          getMessages(sessionId, controller.signal),
+        ])
+        if (controller.signal.aborted) return
+        if (
+          (traceResult.status === 'rejected' && isAbortError(traceResult.reason)) ||
+          (messagesResult.status === 'rejected' && isAbortError(messagesResult.reason))
+        ) {
+          return
         }
+        setLoad({
+          state: 'loaded',
+          session,
+          trace: traceResult.status === 'fulfilled' ? traceResult.value : [],
+          traceError:
+            traceResult.status === 'rejected'
+              ? traceResult.reason instanceof Error
+                ? traceResult.reason.message
+                : 'Unknown trace error'
+              : null,
+          messages: messagesResult.status === 'fulfilled' ? messagesResult.value : [],
+          messagesError:
+            messagesResult.status === 'rejected'
+              ? messagesResult.reason instanceof Error
+                ? messagesResult.reason.message
+                : 'Unknown messages error'
+              : null,
+        })
       })
       .catch((error: unknown) => {
         if (isAbortError(error) || controller.signal.aborted) return
@@ -174,25 +198,38 @@ export function SessionPage() {
           session,
           trace: current.state === 'loaded' ? current.trace : [],
           traceError: null,
+          messages: current.state === 'loaded' ? current.messages : [],
+          messagesError: null,
         }))
-        return getTrace(actionSessionId, controller.signal)
-          .then((trace) => {
-            if (controller.signal.aborted) return
-            setLoad((current) =>
-              current.state === 'loaded' ? { ...current, trace, traceError: null } : current,
-            )
+        return Promise.allSettled([
+          getTrace(actionSessionId, controller.signal),
+          getMessages(actionSessionId, controller.signal),
+        ]).then(([traceResult, messagesResult]) => {
+          if (controller.signal.aborted) return
+          setLoad((current) => {
+            if (current.state !== 'loaded') return current
+            const next = { ...current }
+            if (traceResult.status === 'fulfilled') {
+              next.trace = traceResult.value
+              next.traceError = null
+            } else if (!isAbortError(traceResult.reason)) {
+              next.traceError =
+                traceResult.reason instanceof Error
+                  ? traceResult.reason.message
+                  : 'Unknown trace error'
+            }
+            if (messagesResult.status === 'fulfilled') {
+              next.messages = messagesResult.value
+              next.messagesError = null
+            } else if (!isAbortError(messagesResult.reason)) {
+              next.messagesError =
+                messagesResult.reason instanceof Error
+                  ? messagesResult.reason.message
+                  : 'Unknown messages error'
+            }
+            return next
           })
-          .catch((error: unknown) => {
-            if (isAbortError(error) || controller.signal.aborted) return
-            setLoad((current) =>
-              current.state === 'loaded'
-                ? {
-                    ...current,
-                    traceError: error instanceof Error ? error.message : 'Unknown trace error',
-                  }
-                : current,
-            )
-          })
+        })
       })
       .catch((error: unknown) => {
         if (isAbortError(error) || controller.signal.aborted) return
@@ -287,12 +324,29 @@ export function SessionPage() {
           <section aria-label="Chat" className="mb-[var(--space-8)]">
             <ChatPanel
               session={load.session}
+              messages={load.messages}
               onSendMessage={(content) =>
                 runAction('message', (signal) => sendMessage(sessionId, content, signal))
               }
               submitting={actionKind === 'message'}
               error={messageError}
             />
+            {load.messagesError && (
+              <div role="alert" className="mt-3 text-sm text-[var(--color-danger)]">
+                <p>Could not refresh the conversation: {load.messagesError}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoad({ state: 'loading' })
+                    setColdStart(false)
+                    setLoadVersion((version) => version + 1)
+                  }}
+                  className="btn btn-secondary mt-2"
+                >
+                  Retry session data
+                </button>
+              </div>
+            )}
           </section>
 
           <section

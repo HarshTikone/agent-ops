@@ -13,8 +13,14 @@ from scripts import archive_sessions
 from scripts.archive_sessions import apply_archival, archive_reason, plan_archival, restore_all
 
 
-def _session(*, task: str, archived_at=None, status: str = "done") -> dict:
-    return {"id": uuid.uuid4(), "task": task, "status": status, "archived_at": archived_at}
+def _session(*, task: str, archived_at=None, status: str = "done", title=None) -> dict:
+    return {
+        "id": uuid.uuid4(),
+        "task": task,
+        "title": title,
+        "status": status,
+        "archived_at": archived_at,
+    }
 
 
 def test_blank_task_is_archived_as_untitled() -> None:
@@ -58,6 +64,27 @@ def test_genuine_task_is_left_alone() -> None:
 
 def test_stuck_running_session_with_no_marker_is_left_to_the_reaper() -> None:
     assert archive_reason(_session(task="to be deleted", status="running")) is None
+
+
+def test_classifies_on_title_not_the_drifted_follow_up_task() -> None:
+    """WP5 (ADR-036): `task` is overwritten by a follow-up turn (ADR-033), so
+    a genuine session must not start looking like a fixture just because a
+    later message happened to contain a marker word."""
+    session = _session(title="Use the calculator tool to compute 47 * 89.", task="qa_ish note")
+    assert archive_reason(session) is None
+
+
+def test_classifies_a_fixture_by_title_even_after_a_genuine_looking_follow_up() -> None:
+    session = _session(title="qa_recheck_20260906: write a note", task="a genuine follow-up")
+    assert archive_reason(session) == "QA fixture (task contains 'qa_')"
+
+
+def test_falls_back_to_task_when_title_is_unset() -> None:
+    """A session created before migration 0008's backfill, or a plain dict
+    that never set title at all (as every other test in this file does)."""
+    assert (
+        archive_reason(_session(task="do something", title=None)) == "smoke-test placeholder task"
+    )
 
 
 def test_plan_archival_skips_already_archived_sessions() -> None:

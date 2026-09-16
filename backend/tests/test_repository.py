@@ -107,6 +107,48 @@ def test_restart_session_fails_on_a_non_terminal_status(db_pool, non_terminal_st
             conn.execute("DELETE FROM sessions WHERE id = %s", (session["id"],))
 
 
+def test_create_session_with_a_task_sets_title_to_match(db_pool) -> None:
+    row = repo.create_session(db_pool, task="what is 2 + 2?")
+    try:
+        assert row["title"] == "what is 2 + 2?"
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (row["id"],))
+
+
+def test_create_session_with_no_task_leaves_title_unset(db_pool) -> None:
+    row = repo.create_session(db_pool)
+    try:
+        assert row["title"] is None
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (row["id"],))
+
+
+def test_start_session_sets_title_from_the_first_message(db_pool) -> None:
+    created = repo.create_session(db_pool)
+    started = repo.start_session(db_pool, created["id"], task="what is 2+2?")
+    try:
+        assert started["title"] == "what is 2+2?"
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (created["id"],))
+
+
+def test_restart_session_leaves_title_untouched(db_pool) -> None:
+    """WP5 (ADR-036): unlike `task`, a follow-up turn must not retitle the
+    session -- `title` is set once, from the first message, and stays put."""
+    session = repo.create_session(db_pool, task="first task")
+    repo.update_session_status(db_pool, session["id"], status="done", final_answer="a")
+    restarted = repo.restart_session(db_pool, session["id"], task="second task")
+    try:
+        assert restarted["title"] == "first task"
+        assert restarted["task"] == "second task"
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session["id"],))
+
+
 def test_list_sessions_returns_most_recent_first(db_pool) -> None:
     older = repo.create_session(db_pool, task="older")
     newer = repo.create_session(db_pool, task="newer")

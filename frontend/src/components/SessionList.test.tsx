@@ -6,9 +6,11 @@ import { SessionList } from './SessionList'
 import type { Session } from '../lib/api'
 
 function makeSession(overrides: Partial<Session> = {}): Session {
+  const task = overrides.task ?? 'what is 2+2?'
   return {
     id: 's1',
-    task: 'what is 2+2?',
+    task,
+    title: task,
     status: 'done',
     final_answer: 'it is 4',
     archived_at: null,
@@ -45,6 +47,16 @@ describe('SessionList', () => {
     expect(screen.getByRole('heading', { level: 2, name: 'first task' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { level: 2, name: 'second task' })).toBeInTheDocument()
     expect(screen.getByText('Needs approval')).toBeInTheDocument()
+  })
+
+  it('shows the stable title, not a follow-up turn task drift (WP5, ADR-036)', () => {
+    renderWithRouter(
+      <SessionList
+        sessions={[makeSession({ title: 'first task', task: 'a much later follow-up' })]}
+      />,
+    )
+    expect(screen.getByRole('heading', { level: 2, name: 'first task' })).toBeInTheDocument()
+    expect(screen.queryByText('a much later follow-up')).not.toBeInTheDocument()
   })
 
   it('shows a placeholder for a session with no task yet', () => {

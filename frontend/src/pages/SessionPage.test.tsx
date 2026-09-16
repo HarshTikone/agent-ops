@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionPage } from './SessionPage'
 import * as api from '../lib/api'
-import type { Session, TraceEvent } from '../lib/api'
+import type { Message, Session, TraceEvent } from '../lib/api'
 
 const SESSION_ID = '91255bea-f210-48b0-a3df-8dea7938d645'
 
@@ -14,6 +14,7 @@ vi.mock('../lib/api', async () => {
     ...actual,
     getSession: vi.fn(),
     getTrace: vi.fn(),
+    getMessages: vi.fn(),
     sendMessage: vi.fn(),
     approvePendingAction: vi.fn(),
     rejectPendingAction: vi.fn(),
@@ -21,9 +22,11 @@ vi.mock('../lib/api', async () => {
 })
 
 function makeSession(overrides: Partial<Session> = {}): Session {
+  const task = overrides.task ?? ''
   return {
     id: SESSION_ID,
-    task: '',
+    task,
+    title: task || null,
     status: 'created',
     final_answer: null,
     archived_at: null,
@@ -32,6 +35,25 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     pending_action: null,
     ...overrides,
   }
+}
+
+function makeConversation(userContent: string, assistantContent: string): Message[] {
+  return [
+    {
+      id: 'm1',
+      session_id: SESSION_ID,
+      role: 'user',
+      content: userContent,
+      created_at: '2026-08-24T00:00:00Z',
+    },
+    {
+      id: 'm2',
+      session_id: SESSION_ID,
+      role: 'assistant',
+      content: assistantContent,
+      created_at: '2026-08-24T00:00:01Z',
+    },
+  ]
 }
 
 function renderPage(entry = `/sessions/${SESSION_ID}`) {
@@ -48,6 +70,7 @@ describe('SessionPage', () => {
   beforeEach(() => {
     vi.mocked(api.getSession).mockReturnValue(new Promise(() => {}))
     vi.mocked(api.getTrace).mockReturnValue(new Promise(() => {}))
+    vi.mocked(api.getMessages).mockReturnValue(new Promise(() => {}))
   })
 
   afterEach(() => {
@@ -62,6 +85,7 @@ describe('SessionPage', () => {
   it('shows an error state when the session fails to load', async () => {
     vi.mocked(api.getSession).mockRejectedValue(new Error('session not found'))
     vi.mocked(api.getTrace).mockResolvedValue([])
+    vi.mocked(api.getMessages).mockResolvedValue([])
     renderPage()
     expect(await screen.findByRole('alert')).toHaveTextContent('session not found')
   })
@@ -70,6 +94,7 @@ describe('SessionPage', () => {
     vi.mocked(api.getSession).mockResolvedValue(
       makeSession({ status: 'done', task: 'do a thing', final_answer: 'done!' }),
     )
+    vi.mocked(api.getMessages).mockResolvedValue(makeConversation('do a thing', 'done!'))
     vi.mocked(api.getTrace).mockResolvedValue([
       {
         id: 1,
@@ -97,6 +122,7 @@ describe('SessionPage', () => {
     vi.mocked(api.getSession).mockResolvedValue(
       makeSession({ status: 'done', task: 'do a thing', final_answer: 'done!' }),
     )
+    vi.mocked(api.getMessages).mockResolvedValue(makeConversation('do a thing', 'done!'))
     vi.mocked(api.getTrace).mockResolvedValue([
       {
         id: 1,
@@ -142,6 +168,7 @@ describe('SessionPage', () => {
       makeSession({ status: 'running', task: 'in progress' }),
     )
     vi.mocked(api.getTrace).mockResolvedValue([])
+    vi.mocked(api.getMessages).mockResolvedValue([])
     renderPage()
 
     const totals = await screen.findByLabelText('Run totals')
@@ -152,6 +179,7 @@ describe('SessionPage', () => {
     const user = userEvent.setup()
     vi.mocked(api.getSession).mockResolvedValueOnce(makeSession({ status: 'created' }))
     vi.mocked(api.getTrace).mockResolvedValue([])
+    vi.mocked(api.getMessages).mockResolvedValue(makeConversation('what is 2+2?', 'it is 4'))
     vi.mocked(api.sendMessage).mockResolvedValue(
       makeSession({ status: 'done', task: 'what is 2+2?', final_answer: 'it is 4' }),
     )
@@ -185,6 +213,9 @@ describe('SessionPage', () => {
       makeSession({ status: 'awaiting_approval', task: 'save a note', pending_action: pending }),
     )
     vi.mocked(api.getTrace).mockResolvedValue([])
+    vi.mocked(api.getMessages)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(makeConversation('save a note', 'saved'))
     vi.mocked(api.approvePendingAction).mockResolvedValue(
       makeSession({ status: 'done', task: 'save a note', final_answer: 'saved' }),
     )
@@ -215,6 +246,9 @@ describe('SessionPage', () => {
       makeSession({ status: 'awaiting_approval', task: 'save a note', pending_action: pending }),
     )
     vi.mocked(api.getTrace).mockResolvedValue([])
+    vi.mocked(api.getMessages)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(makeConversation('save a note', 'not saved'))
     vi.mocked(api.rejectPendingAction).mockResolvedValue(
       makeSession({ status: 'failed', task: 'save a note', final_answer: 'not saved' }),
     )
@@ -249,6 +283,7 @@ describe('SessionPage', () => {
       makeSession({ status: 'awaiting_approval', task: 'save a note', pending_action: pending }),
     )
     vi.mocked(api.getTrace).mockResolvedValue([])
+    vi.mocked(api.getMessages).mockResolvedValue([])
     vi.mocked(api.approvePendingAction).mockRejectedValue(
       new Error("pending action already approved, not 'pending'"),
     )
@@ -266,6 +301,7 @@ describe('SessionPage', () => {
     let actionSignal: AbortSignal | undefined
     vi.mocked(api.getSession).mockResolvedValueOnce(makeSession({ status: 'created' }))
     vi.mocked(api.getTrace).mockResolvedValue([])
+    vi.mocked(api.getMessages).mockResolvedValue([])
     vi.mocked(api.sendMessage).mockImplementation((_id, _content, signal) => {
       actionSignal = signal
       return new Promise(() => {})
@@ -285,6 +321,7 @@ describe('SessionPage', () => {
     expect(screen.getByRole('heading', { name: 'Invalid session link' })).toBeInTheDocument()
     expect(api.getSession).not.toHaveBeenCalled()
     expect(api.getTrace).not.toHaveBeenCalled()
+    expect(api.getMessages).not.toHaveBeenCalled()
   })
 
   it('keeps a successful decision closed when the trace refresh fails', async () => {
@@ -305,6 +342,9 @@ describe('SessionPage', () => {
     vi.mocked(api.getTrace)
       .mockResolvedValueOnce([])
       .mockRejectedValueOnce(new Error('trace unavailable'))
+    vi.mocked(api.getMessages)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(makeConversation('save', 'saved'))
     vi.mocked(api.approvePendingAction).mockResolvedValue(
       makeSession({ status: 'done', task: 'save', final_answer: 'saved' }),
     )

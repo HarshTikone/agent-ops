@@ -22,6 +22,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from app import repository as repo
 from app.api.schemas import (
     CreateMessageRequest,
+    MessageResponse,
     SessionResponse,
     TraceEventResponse,
     validate_message_request,
@@ -200,3 +201,14 @@ def get_trace(session_id: UUID, pool: DbPool = Depends(get_db_pool)) -> list[dic
     if repo.get_session(pool, session_id) is None:
         raise HTTPException(status_code=404, detail="session not found")
     return repo.list_trace_events(pool, session_id)
+
+
+@router.get("/sessions/{session_id}/messages", response_model=list[MessageResponse])
+def get_messages(session_id: UUID, pool: DbPool = Depends(get_db_pool)) -> list[dict[str, Any]]:
+    """The full multi-turn conversation (WP5, ADR-036) -- every user/
+    assistant message across every turn, in order. Read-only and
+    unauthenticated like `/trace`; the mutating `POST` at this same path is
+    a separate route (FastAPI dispatches on method, not just path)."""
+    if repo.get_session(pool, session_id) is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    return repo.list_messages(pool, session_id)

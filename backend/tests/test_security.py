@@ -21,6 +21,7 @@ def _session() -> dict:
     return {
         "id": uuid4(),
         "task": "",
+        "title": None,
         "status": "created",
         "final_answer": None,
         "archived_at": None,

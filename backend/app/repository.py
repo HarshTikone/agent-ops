@@ -36,16 +36,18 @@ def create_session(pool: DbPool, *, task: str = "") -> dict[str, Any]:
         if task:
             return _required_row(
                 conn.execute(
-                    "INSERT INTO sessions (task, status) VALUES (%s, 'running') "
-                    "RETURNING id, task, status, final_answer, archived_at, created_at, updated_at",
-                    (task,),
+                    "INSERT INTO sessions (task, title, status) VALUES (%s, %s, 'running') "
+                    "RETURNING id, task, title, status, final_answer, archived_at, "
+                    "created_at, updated_at",
+                    (task, task),
                 ).fetchone(),
                 operation="create session",
             )
         return _required_row(
             conn.execute(
                 "INSERT INTO sessions DEFAULT VALUES "
-                "RETURNING id, task, status, final_answer, archived_at, created_at, updated_at"
+                "RETURNING id, task, title, status, final_answer, archived_at, "
+                "created_at, updated_at"
             ).fetchone(),
             operation="create session",
         )
@@ -55,15 +57,19 @@ def start_session(pool: DbPool, session_id: UUID, *, task: str) -> dict[str, Any
     """Moves a session from 'created' to 'running' and records its task —
     only succeeds if it's still 'created', so a second message can't
     silently restart an already-running session (the API layer turns a
-    None here into a 409)."""
+    None here into a 409). Also sets `title` (WP5, ADR-036) -- COALESCE'd
+    rather than unconditional only as a defensive no-op, since a session
+    reaching here always has a NULL title in practice (this is its first
+    message, the only place before this one that could have set it)."""
     with pool.connection() as conn:
         return conn.execute(
             """
-            UPDATE sessions SET task = %s, status = 'running', updated_at = now()
+            UPDATE sessions
+            SET task = %s, title = COALESCE(title, %s), status = 'running', updated_at = now()
             WHERE id = %s AND status = 'created'
-            RETURNING id, task, status, final_answer, archived_at, created_at, updated_at
+            RETURNING id, task, title, status, final_answer, archived_at, created_at, updated_at
             """,
-            (task, session_id),
+            (task, task, session_id),
         ).fetchone()
 
 
@@ -74,13 +80,17 @@ def restart_session(pool: DbPool, session_id: UUID, *, task: str) -> dict[str, A
     status from a prior turn. A session still 'running' or
     'awaiting_approval' is genuinely mid-flight -- a second message there
     would race the first, so those correctly match neither this WHERE
-    clause nor `start_session`'s, and the API layer's 409 still applies."""
+    clause nor `start_session`'s, and the API layer's 409 still applies.
+
+    Deliberately does NOT touch `title` (WP5, ADR-036): the session list's
+    title must stay whatever the first message set, not drift to whatever
+    the latest follow-up said."""
     with pool.connection() as conn:
         return conn.execute(
             """
             UPDATE sessions SET task = %s, status = 'running', updated_at = now()
             WHERE id = %s AND status IN ('done', 'degraded', 'failed')
-            RETURNING id, task, status, final_answer, archived_at, created_at, updated_at
+            RETURNING id, task, title, status, final_answer, archived_at, created_at, updated_at
             """,
             (task, session_id),
         ).fetchone()
@@ -136,7 +146,7 @@ def fail_stale_running_session(
 def get_session(pool: DbPool, session_id: UUID) -> dict[str, Any] | None:
     with pool.connection() as conn:
         return conn.execute(
-            "SELECT id, task, status, final_answer, archived_at, created_at, updated_at "
+            "SELECT id, task, title, status, final_answer, archived_at, created_at, updated_at "
             "FROM sessions WHERE id = %s",
             (session_id,),
         ).fetchone()
@@ -159,6 +169,7 @@ def list_sessions(
             SELECT
                 s.id,
                 s.task,
+                s.title,
                 s.status,
                 s.final_answer,
                 s.archived_at,
@@ -196,7 +207,7 @@ def list_sessions_for_maintenance(pool: DbPool) -> list[dict[str, Any]]:
     full table rather than the API's paginated, unarchived-by-default view."""
     with pool.connection() as conn:
         return conn.execute(
-            "SELECT id, task, status, archived_at, created_at, updated_at "
+            "SELECT id, task, title, status, archived_at, created_at, updated_at "
             "FROM sessions ORDER BY created_at"
         ).fetchall()
 
@@ -210,7 +221,7 @@ def archive_session(pool: DbPool, session_id: UUID) -> dict[str, Any] | None:
             """
             UPDATE sessions SET archived_at = COALESCE(archived_at, now()), updated_at = now()
             WHERE id = %s
-            RETURNING id, task, status, final_answer, archived_at, created_at, updated_at
+            RETURNING id, task, title, status, final_answer, archived_at, created_at, updated_at
             """,
             (session_id,),
         ).fetchone()
@@ -224,7 +235,7 @@ def restore_session(pool: DbPool, session_id: UUID) -> dict[str, Any] | None:
             """
             UPDATE sessions SET archived_at = NULL, updated_at = now()
             WHERE id = %s
-            RETURNING id, task, status, final_answer, archived_at, created_at, updated_at
+            RETURNING id, task, title, status, final_answer, archived_at, created_at, updated_at
             """,
             (session_id,),
         ).fetchone()

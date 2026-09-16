@@ -1,5 +1,5 @@
 import { useState, type FormEvent, type KeyboardEvent } from 'react'
-import type { Session, SessionStatus } from '../lib/api'
+import type { Message, Session, SessionStatus } from '../lib/api'
 
 const MAX_MESSAGE_LENGTH = 8_000
 
@@ -84,20 +84,38 @@ function MessageComposer({
   )
 }
 
+function MessageBubble({ message }: { message: Message }) {
+  const isUser = message.role === 'user'
+  return (
+    <div
+      className={
+        isUser
+          ? 'max-w-[80%] self-end rounded-[var(--radius-md)] bg-[var(--color-accent-100)] p-[var(--space-3)] text-sm text-[var(--color-accent-800)]'
+          : 'max-w-[80%] self-start rounded-[var(--radius-md)] border border-[var(--color-divider)] bg-[var(--color-surface)] p-[var(--space-3)] text-sm'
+      }
+    >
+      {message.content}
+    </div>
+  )
+}
+
 /**
  * A session with status 'created' shows only the message form (its first
  * message becomes the task and starts the one graph run). Every other
- * status shows the task/answer transcript; a terminal one (done/degraded/
- * failed) additionally shows a follow-up composer below it, since those can
- * still take a new message (ADR-033).
+ * status shows the full multi-turn conversation (WP5, ADR-036) -- every
+ * message across every turn, not just the latest one's task/final_answer;
+ * a terminal status (done/degraded/failed) additionally shows a follow-up
+ * composer below it, since those can still take a new message (ADR-033).
  */
 export function ChatPanel({
   session,
+  messages,
   onSendMessage,
   submitting,
   error,
 }: {
   session: Session
+  messages: Message[]
   onSendMessage: (content: string) => void
   submitting: boolean
   error: string | null
@@ -119,24 +137,18 @@ export function ChatPanel({
 
   return (
     <div className="flex flex-col gap-[var(--space-3)]">
-      <div className="max-w-[80%] self-end rounded-[var(--radius-md)] bg-[var(--color-accent-100)] p-[var(--space-3)] text-sm text-[var(--color-accent-800)]">
-        {session.task}
-      </div>
+      {messages.map((message) => (
+        <MessageBubble key={message.id} message={message} />
+      ))}
 
-      {session.final_answer && (
-        <div className="max-w-[80%] self-start rounded-[var(--radius-md)] border border-[var(--color-divider)] bg-[var(--color-surface)] p-[var(--space-3)] text-sm">
-          {session.final_answer}
-        </div>
-      )}
-
-      {!session.final_answer && session.status === 'running' && (
+      {session.status === 'running' && (
         <p role="status" className="text-muted text-[13px]">
           <span className="pulse-dot mr-[6px]" />
           Thinking…
         </p>
       )}
 
-      {!session.final_answer && session.status === 'awaiting_approval' && (
+      {session.status === 'awaiting_approval' && (
         <p role="status" className="text-[13px] text-[var(--color-warning)]">
           Paused — waiting for your approval below.
         </p>

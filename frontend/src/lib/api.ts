@@ -179,12 +179,30 @@ export interface PendingAction {
 export interface Session {
   id: string
   task: string
+  /**
+   * Set once, from the session's first message, and never touched by a
+   * later follow-up turn (WP5, ADR-036) — `task` itself IS overwritten on
+   * every follow-up (ADR-033), so `title` is what the session list uses to
+   * stay stable. Null only for the moment between session creation and its
+   * first message, when neither has been set yet.
+   */
+  title: string | null
   status: SessionStatus
   final_answer: string | null
   archived_at: string | null
   created_at: string
   updated_at: string
   pending_action: PendingAction | null
+}
+
+/** One turn's user or assistant message (WP5, ADR-036) — the full
+ * multi-turn conversation, not just the latest turn's task/final_answer. */
+export interface Message {
+  id: string
+  session_id: string
+  role: 'user' | 'assistant'
+  content: string
+  created_at: string
 }
 
 export interface TraceEvent {
@@ -290,6 +308,11 @@ export function restoreSession(sessionId: string, signal?: AbortSignal): Promise
 
 export function getTrace(sessionId: string, signal?: AbortSignal): Promise<TraceEvent[]> {
   return request<TraceEvent[]>(`/sessions/${sessionId}/trace`, { signal })
+}
+
+/** The full conversation across every turn (WP5, ADR-036), in order. */
+export function getMessages(sessionId: string, signal?: AbortSignal): Promise<Message[]> {
+  return request<Message[]>(`/sessions/${sessionId}/messages`, { signal })
 }
 
 /** Blocks until the graph either finishes or pauses on an approval —

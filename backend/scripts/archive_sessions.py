@@ -35,11 +35,20 @@ _FIXTURE_EXACT_TASKS = {"do something"}
 
 def archive_reason(session: dict[str, Any]) -> str | None:
     """Why `session` should be archived, or None to leave it alone. Ignores
-    `archived_at` -- callers filter already-archived sessions themselves."""
-    task = session["task"].strip()
-    if not task:
+    `archived_at` -- callers filter already-archived sessions themselves.
+
+    Classifies on `title`, not `task` (WP5, ADR-036): `restart_session`
+    overwrites `task` on every follow-up turn (ADR-033), so a genuine
+    session that later receives a QA-styled follow-up message must not
+    suddenly look like a fixture. `title` is set once, from the first
+    message, and stays stable -- for any session not yet on its second
+    turn the two are identical anyway, so this falls back to `task` when
+    `title` is absent (a plain dict built without one, or a session whose
+    'created' row has neither set yet)."""
+    identifying_text = (session.get("title") or session["task"]).strip()
+    if not identifying_text:
         return "untitled (no task was ever set)"
-    lowered = task.lower()
+    lowered = identifying_text.lower()
     for marker in _FIXTURE_MARKERS:
         if marker in lowered:
             return f"QA fixture (task contains '{marker}')"

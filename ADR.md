@@ -2080,7 +2080,10 @@ no-ops and only the new ones land.
   composer added below it on a terminal status. A real transcript view is
   future work, not required for a follow-up message to work correctly.
   Superseded in part by ADR-034 for how the trace itself stays correct
-  across turns.
+  across turns, and fully superseded by ADR-036, which adds both the real
+  transcript view and a `title` column stable across the `task` drift a
+  follow-up turn causes (a consequence of this ADR's own `restart_session`
+  design, not called out as a tradeoff here at the time).
 
 **Mutation check (ADR-007 standard, backfilled 2026-09-16, Sprint 04 WP4)**
 
@@ -2319,3 +2322,101 @@ Two independent protections, addressing the two different gaps:
   every 60s across concurrently-running sessions is negligible next to the
   LLM calls it runs alongside, but is a real, if small, additional draw on
   the same shared pool.
+
+---
+
+## ADR-036: A session's list title is decoupled from `task`; the full conversation gets its own endpoint
+
+**Date:** 2026-09-16 (Sprint 04 QA remediation)
+
+**Context**
+
+ADR-033's own "what we gave up" already named the gap: `ChatPanel` rendered
+only the latest task/final-answer pair per session, not a real transcript.
+Combined with `restart_session` overwriting `task` on every follow-up turn
+(the whole point of ADR-033), the session list's card title silently
+retitled itself mid-life to whatever the most recent message said — a
+session started as "what is 2+2?" could end up listed as "what about
+tomorrow?" after a follow-up, with no way to tell from the list what the
+session was originally about. `archive_sessions.py`'s fixture classification
+(ADR from Part 0's shipped archiving work) had the identical exposure: it
+read `task` directly, so a genuine session could start looking like a QA
+fixture (or a QA fixture could start looking genuine) purely because of what
+a later turn happened to say.
+
+**Decision**
+
+New `title text` column (migration `0008_session_title.sql`), set once and
+never touched again after that:
+
+- `create_session(pool, task=...)` sets `title = task` at creation time (the
+  one-step create-with-task path tests and scripts use).
+- `start_session` sets `title = COALESCE(title, %s)` — the normal
+  create-then-first-message flow, so `title` is set from whichever message
+  actually arrives first, once, and never overwritten by a second call.
+- `restart_session`'s `SET` clause deliberately does not mention `title` at
+  all (verified by mutation check below, not just by inspection) — a
+  follow-up turn updates `task` exactly as ADR-033 already does, and leaves
+  `title` alone.
+- Migration 0008 backfills every existing row: `title` = that session's
+  first user message content, falling back to its current `task` for a
+  session with no messages yet.
+
+`scripts/archive_sessions.py`'s `archive_reason` now classifies on
+`session.get("title") or session["task"]` instead of `task` alone — falling
+back to `task` for a plain dict that never set `title` (every existing pure
+test in `test_archive_sessions.py`, and any 'created' row with neither set
+yet), but preferring the stable `title` whenever one exists, for the same
+reason `restart_session` leaves it alone: a follow-up turn's wording must
+not change which sessions look like fixtures.
+
+New `GET /sessions/{id}/messages` endpoint returns `repo.list_messages`
+(already used server-side to build `resumed_state`, just not previously
+exposed) as `list[MessageResponse]` — every user/assistant message across
+every turn, in creation order. Read-only and unauthenticated, matching
+`/trace`'s existing shape; the mutating `POST` at the identical path is a
+separate route since FastAPI dispatches on method.
+
+Frontend: `Session.title` and a new `Message`/`getMessages` in `api.ts`;
+`SessionList` displays `title || task` (falling back to the existing
+"Untitled session" placeholder); `ChatPanel` now renders the full fetched
+`messages` array as alternating user/assistant bubbles instead of the single
+task/final-answer pair, keeping the same `MessageComposer` for both the
+first message and every follow-up; `SessionPage` fetches `messages`
+alongside `trace` on initial load and after every action, with the same
+per-source independent-failure pattern `traceError` already established —
+a failed message fetch shows its own retry, and does not blank out a
+successful trace or vice versa.
+
+**What we gave up**
+
+- `ChatPanel` re-fetches the whole message list on every action (send,
+  approve, reject) at the same cadence as `trace` — no incremental or
+  paginated fetch, so a long conversation re-downloads its entire history
+  each time. Deferred until conversation length is actually measured as a
+  problem, matching ADR-033's own token-cost deferral for the same
+  underlying growth.
+- `title` has no editing UI and no access control of its own — it is a
+  derived, read-only label. A person wanting to rename a session's card is
+  new scope this ADR does not add.
+- Migration 0008's backfill runs once, at migration time: a session created
+  between this migration being written and deployed, with no messages yet,
+  simply keeps `title` NULL until its first message sets it — identical to
+  a fresh `'created'` session's ordinary lifecycle, not a gap specific to
+  the backfill.
+
+**Mutation check (ADR-007 standard)**
+
+- Added `title = %s` back into `restart_session`'s `SET` clause (the
+  behavior this ADR explicitly removes):
+  `test_restart_session_leaves_title_untouched` and
+  `test_title_stays_stable_across_a_follow_up_turn_while_task_moves_on`
+  both failed (title drifted to the second turn's task). Restored, both pass.
+- Reverted `archive_reason` to classify on `session["task"]` alone:
+  `test_classifies_on_title_not_the_drifted_follow_up_task` and
+  `test_classifies_a_fixture_by_title_even_after_a_genuine_looking_follow_up`
+  both failed (task-only classification, exactly the bug this ADR fixes).
+  Restored, both pass.
+- Full suite (335 tests, DB-backed included) against real local PostgreSQL
+  17: all green, ruff/black/mypy clean. Frontend: 118 vitest tests, eslint,
+  tsc -b, and `vite build` all clean.

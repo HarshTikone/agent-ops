@@ -965,3 +965,82 @@ def test_trace_sequence_conflict_with_identical_content_is_not_logged(db_pool, c
     finally:
         with db_pool.connection() as conn:
             conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+
+
+def test_title_stays_stable_across_a_follow_up_turn_while_task_moves_on(db_pool) -> None:
+    """WP5 (ADR-036): `task` is overwritten by every follow-up turn
+    (ADR-033) -- `title` must not be, so the session list can show a stable
+    name instead of silently retitling itself to whatever the latest
+    message said."""
+    from app.dependencies import get_llm_provider
+
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["id"]
+    scripted = _ScriptedLLM(
+        [
+            LLMResponse(content="four", tool_calls=[], provider="test"),
+            LLMResponse(content="six", tool_calls=[], provider="test"),
+        ]
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: scripted
+    try:
+        turn1 = client.post(f"/sessions/{session_id}/messages", json={"content": "what is 2+2?"})
+        assert turn1.json()["title"] == "what is 2+2?"
+        assert turn1.json()["task"] == "what is 2+2?"
+
+        turn2 = client.post(f"/sessions/{session_id}/messages", json={"content": "what is 3+3?"})
+        assert turn2.status_code == 200
+        assert turn2.json()["task"] == "what is 3+3?"
+        assert turn2.json()["title"] == "what is 2+2?"
+
+        fetched = client.get(f"/sessions/{session_id}").json()
+        assert fetched["title"] == "what is 2+2?"
+        assert fetched["task"] == "what is 3+3?"
+    finally:
+        del app.dependency_overrides[get_llm_provider]
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+        create_checkpointer(db_pool).delete_thread(str(session_id))
+
+
+def test_messages_endpoint_returns_every_turns_messages_in_order(db_pool) -> None:
+    """WP5 (ADR-036): the full conversation, not just the latest turn's
+    task/final_answer -- two turns must come back as four messages, in the
+    order they actually happened."""
+    from app.dependencies import get_llm_provider
+
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["id"]
+    scripted = _ScriptedLLM(
+        [
+            LLMResponse(content="four", tool_calls=[], provider="test"),
+            LLMResponse(content="six", tool_calls=[], provider="test"),
+        ]
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: scripted
+    try:
+        client.post(f"/sessions/{session_id}/messages", json={"content": "what is 2+2?"})
+        client.post(f"/sessions/{session_id}/messages", json={"content": "what is 3+3?"})
+
+        messages = client.get(f"/sessions/{session_id}/messages").json()
+
+        assert [(m["role"], m["content"]) for m in messages] == [
+            ("user", "what is 2+2?"),
+            ("assistant", "four"),
+            ("user", "what is 3+3?"),
+            ("assistant", "six"),
+        ]
+        assert all(m["session_id"] == session_id for m in messages)
+    finally:
+        del app.dependency_overrides[get_llm_provider]
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+        create_checkpointer(db_pool).delete_thread(str(session_id))
+
+
+def test_messages_endpoint_404s_for_an_unknown_session(db_pool) -> None:
+    import uuid
+
+    client = TestClient(app)
+    response = client.get(f"/sessions/{uuid.uuid4()}/messages")
+    assert response.status_code == 404

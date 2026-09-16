@@ -27,6 +27,12 @@ class PendingActionResponse(BaseModel):
 class SessionResponse(BaseModel):
     id: UUID
     task: str
+    # Set once, from the session's first message, and never touched by a
+    # later follow-up turn (WP5, ADR-036) -- `task` itself IS overwritten on
+    # every follow-up (ADR-033), so `title` is what the session list uses to
+    # stay stable. Nullable only for the moment between session creation and
+    # its first message, when neither has been set yet.
+    title: str | None
     status: str
     final_answer: str | None
     archived_at: datetime | None
@@ -36,6 +42,14 @@ class SessionResponse(BaseModel):
     # the approval modal's entire data need in one fetch, no second round
     # trip to find out what's pending.
     pending_action: PendingActionResponse | None = None
+
+
+class MessageResponse(BaseModel):
+    id: UUID
+    session_id: UUID
+    role: str
+    content: str
+    created_at: datetime
 
 
 class TraceEventResponse(BaseModel):

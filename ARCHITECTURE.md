@@ -443,3 +443,24 @@ before invoking the graph, regardless of which path built `next_state`.
 identical `(node, detail)` at that sequence is a harmless replay and stays
 silent; anything else logs `trace_sequence_conflict` at WARNING instead of
 disappearing.
+
+## 15. Session titles and the full conversation view
+
+`sessions.title` (ADR-036) is a session's stable, list-facing name, kept
+deliberately separate from `task` because `restart_session` (§14) overwrites
+`task` on every follow-up turn. `title` is set exactly once — at
+create-with-task, or by `start_session`'s `COALESCE(title, %s)` on a
+session's first message — and `restart_session`'s `SET` clause never
+mentions it. `scripts/archive_sessions.py`'s `archive_reason` classifies on
+`title` (falling back to `task` when unset) for the identical reason: a
+follow-up turn's wording must not change whether a session looks like a QA
+fixture.
+
+`GET /sessions/{id}/messages` exposes `repo.list_messages` — every user/
+assistant message across every turn, in creation order — the same data
+`continue_session_run` already reads server-side to build `resumed_state`,
+now available to a client. `ChatPanel` renders this list as the actual
+multi-turn transcript instead of the single latest task/answer pair;
+`SessionPage` fetches it alongside `trace` on every load and after every
+action, failing independently of the trace fetch the same way `traceError`
+already does.
