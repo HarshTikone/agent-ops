@@ -10,6 +10,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     task: '',
     status: 'created',
     final_answer: null,
+    archived_at: null,
     created_at: '2026-08-24T00:00:00Z',
     updated_at: '2026-08-24T00:00:00Z',
     pending_action: null,

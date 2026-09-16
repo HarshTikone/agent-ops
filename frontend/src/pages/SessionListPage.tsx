@@ -29,7 +29,6 @@ export function SessionListPage() {
   const navigate = useNavigate()
 
   useEffect(() => {
-    setLoad({ state: 'loading' })
     const controller = new AbortController()
     const timer = window.setTimeout(() => setColdStart(true), 8_000)
     listSessions(controller.signal, showArchived)
@@ -151,7 +150,10 @@ export function SessionListPage() {
         <input
           type="checkbox"
           checked={showArchived}
-          onChange={(e) => setShowArchived(e.target.checked)}
+          onChange={(e) => {
+            setLoad({ state: 'loading' })
+            setShowArchived(e.target.checked)
+          }}
         />
         Show archived sessions
       </label>
@@ -177,6 +179,7 @@ export function SessionListPage() {
           <button
             type="button"
             onClick={() => {
+              setLoad({ state: 'loading' })
               setColdStart(false)
               setLoadVersion((version) => version + 1)
             }}
