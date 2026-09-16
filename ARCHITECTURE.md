@@ -406,8 +406,22 @@ reset the way `initial_state` sets it for a brand-new session. A session
 that reached its terminal status without the graph ever running at all (a
 crash before `start_session_run` got called) has no checkpoint to read, so
 `continue_session_run` falls back to `initial_state` in that case instead.
-Trace persistence needed no changes: `_persist_new_trace_events` already
-inserts by durable `(session_id, sequence)` with `ON CONFLICT DO NOTHING`
-(ADR-024), so re-sending a follow-up turn's full accumulated trace — old
-events included, since `resumed_state` carries the whole prior trace list
-forward — reinserts the old ones as no-ops.
+
+**Trace sequencing (ADR-034) is seeded from the database, not the
+checkpoint.** The checkpoint's own trace list is what `resumed_state`/
+`initial_state` above produce, but three call sites (the CRASH handlers in
+`app/api/sessions.py` and `app/api/approvals.py`, ADR-020; the REAPED handler
+in `scripts/reap_sessions.py`, ADR-031) write directly to `trace_events` with
+no explicit sequence, entirely outside the graph. That desyncs the
+checkpoint's notion of "how long is this trace" from the database's real row
+count, and the next graph-driven event then computes a sequence number one of
+those rows already occupies — silently dropped by `ON CONFLICT DO NOTHING`
+(ADR-024), which exists to make replaying an already-persisted result safe,
+not to hide a genuine loss. `continue_session_run` closes this by overwriting
+`next_state["trace"]` with `session_runner._persisted_trace(pool,
+session_id)` — the durable trace, read fresh from `trace_events` — immediately
+before invoking the graph, regardless of which path built `next_state`.
+`_persist_new_trace_events` additionally checks any conflict it does hit: an
+identical `(node, detail)` at that sequence is a harmless replay and stays
+silent; anything else logs `trace_sequence_conflict` at WARNING instead of
+disappearing.

@@ -2056,3 +2056,109 @@ no-ops and only the new ones land.
   renders only the latest task/answer pair per session, with a follow-up
   composer added below it on a terminal status. A real transcript view is
   future work, not required for a follow-up message to work correctly.
+  Superseded in part by ADR-034 for how the trace itself stays correct
+  across turns.
+
+---
+
+## ADR-034: `trace_events` is authoritative for sequence numbers; the checkpoint's copy is a cache
+
+**Date:** 2026-09-16 (Sprint 04 QA remediation)
+
+**Context**
+
+Verified live: session `6a649926…c61d` (reaped by `scripts/reap_sessions.py`,
+ADR-031, so its trace held exactly one `system` "REAPED" row) was then sent a
+follow-up message. It returned `status: "done"` with a real, correct
+answer — but `GET /sessions/{id}/trace` still returned only the original
+REAPED row. The entire follow-up turn's trace had vanished, silently.
+
+Reproduced locally against real Postgres in two shapes (both now regression
+tests in `test_integration_session.py`):
+`test_out_of_band_trace_row_does_not_swallow_the_next_turns_events`
+(a normal turn, then an out-of-band system row, then a follow-up) and
+`test_add_message_failure_leaves_session_failed_not_stuck`'s extended
+assertion (no checkpoint ever created, then a retry).
+
+**Root cause**
+
+Two independent, individually reasonable designs collided. `new_trace_event`/
+`trace_event_after` (`app/graph/state.py`) number each event from
+`len(state["trace"]) + 1` — the checkpoint's own copy of the trace, which
+travels with the rest of the graph state. But three call sites write directly
+to `trace_events` with no explicit `sequence`, so `add_trace_event_on_connection`
+auto-numbers them from the database's own `MAX(sequence) + 1`
+(`app/repository.py`) — entirely outside the graph, and therefore invisible to
+the checkpoint:
+
+- the CRASH handler in `app/api/sessions.py`'s `send_message` (ADR-020, C4)
+- the CRASH handler in `app/api/approvals.py`'s `_decide` (same fix, sibling path)
+- the REAPED handler in `scripts/reap_sessions.py` (ADR-031)
+
+The moment any of these fires, the checkpoint's trace length and the
+database's real row count diverge. `continue_session_run` (ADR-033) built its
+next turn's starting trace from the checkpoint (via `resumed_state`) or from
+scratch (`initial_state`'s empty list as the no-checkpoint fallback) — either
+way, a length that doesn't know about the out-of-band row. The next
+graph-driven event is then computed at a sequence number that row already
+occupies, and `add_trace_event_on_connection`'s `ON CONFLICT (session_id,
+sequence) DO NOTHING` (ADR-024, there specifically to make *replaying* an
+already-persisted result safe) drops it without a sound. The session still
+reaches a correct terminal status and answer — only the trace, the thing this
+project's own architecture calls "the product," goes missing.
+
+**Decision**
+
+`trace_events` is the single source of truth for sequence numbers at every
+turn boundary; the checkpoint's copy is downstream of it, never the other way
+around. `session_runner._persisted_trace(pool, session_id)` reads the full
+durable trace and converts it back to `TraceEvent` shape (datetime →
+ISO string, `Decimal` → string, matching what the checkpointer already
+serializes). `continue_session_run` overwrites `next_state["trace"]` with it
+immediately before invoking the graph, regardless of which path built
+`next_state` (`resumed_state` or the no-checkpoint `initial_state` fallback) —
+so the next sequence number is always computed from what the database
+actually holds.
+
+`ON CONFLICT DO NOTHING` stays: `_apply_result` still needs to safely
+re-persist a whole accumulated trace on every turn, including events already
+written (ADR-024's original reason still holds). What changes is that a
+conflict is no longer trusted silently. `_persist_new_trace_events` now
+checks what a conflict collided with: if the existing row's `(node, detail)`
+match the incoming event, it's a genuine replay and stays silent; if they
+differ, it logs `trace_sequence_conflict` at WARNING with both sides, so a
+real loss — if the source-of-truth fix above ever has a gap — is loud instead
+of invisible.
+
+**Mutation check (ADR-007 standard)**
+
+- Removed `next_state["trace"] = _persisted_trace(...)`: both regression
+  tests above failed, exactly as expected. Restored, both pass.
+- Removed the conflict-comparison block in `_persist_new_trace_events`:
+  `test_trace_sequence_conflict_with_different_content_is_logged` failed
+  (no WARNING emitted); `test_trace_sequence_conflict_with_identical_content_is_not_logged`
+  still passed (a mutant that never logs trivially satisfies "don't log on a
+  replay," which is exactly why both tests exist together). Restored, both pass.
+- Full suite (310 tests, DB-backed included) run against a real local
+  PostgreSQL 17 instance: all green, ruff/black/mypy clean.
+
+**Production data**
+
+The one confirmed-affected session (`…c61d`) cannot be backfilled: the lost
+event's sequence number is already occupied by the row it collided with, and
+there is no record of what the lost event actually contained. Left as-is —
+its trace will read as incomplete for that one historical run. No other
+session has been confirmed to hit this, since it requires an out-of-band
+write (CRASH or REAPED) followed by a follow-up turn, a narrow window that
+existed only from ADR-033 landing to this fix.
+
+**What we gave up**
+
+- The conflict-logging check adds one extra `SELECT` per genuinely-colliding
+  event (never on the common, non-conflicting path) — negligible next to an
+  LLM round trip, not worth optimizing further.
+- A WARNING log is the only signal; nothing pages an operator or fails the
+  request when a conflict is detected after this fix, on the theory that the
+  source-of-truth change should make the conflict path unreachable in
+  practice going forward. If it fires in production, that assumption was wrong
+  somewhere and is worth a fresh investigation, not a silent counter.

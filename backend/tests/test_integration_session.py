@@ -22,6 +22,7 @@ Two complementary tests:
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -445,6 +446,66 @@ def test_add_message_failure_leaves_session_failed_not_stuck(db_pool) -> None:
 
         events = repo.list_trace_events(db_pool, session_id)
         assert any(e["node"] == "system" and "CRASH" in e["detail"] for e in events)
+        # WP1 (Sprint 04): the CRASH row is written directly to trace_events
+        # (repo.add_trace_event with no explicit sequence -- auto-numbered
+        # from the DB's own MAX(sequence)), completely outside the graph's
+        # checkpoint. The retry's checkpoint never saw that row, so its own
+        # first trace event is computed at the SAME sequence number and
+        # silently lost to `ON CONFLICT (session_id, sequence) DO NOTHING`
+        # -- the retry still reports "done" with a real answer while its
+        # own trace event vanishes. This must not happen.
+        assert any(e["node"] == "planner" for e in events), (
+            "the retry's own planner trace event was silently dropped "
+            f"(sequence collision with the CRASH row); events={events}"
+        )
+    finally:
+        del app.dependency_overrides[get_llm_provider]
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+        create_checkpointer(db_pool).delete_thread(str(session_id))
+
+
+def test_out_of_band_trace_row_does_not_swallow_the_next_turns_events(db_pool) -> None:
+    """WP1 (Sprint 04): a trace row written directly to the database (a
+    CRASH or REAPED event, both via repo.add_trace_event with no explicit
+    sequence) desyncs the checkpoint's notion of trace length from the
+    database's actual row count -- the checkpoint never sees that row, so
+    the next graph-driven event is computed at a sequence number the row
+    already occupies and is silently lost to `ON CONFLICT DO NOTHING`.
+
+    Verified live in production (session ...c61d, reaped then messaged
+    again): it reported status 'done' with a real answer while GET
+    .../trace still returned only the single REAPED row -- the whole
+    follow-up turn's trace was silently dropped."""
+    from app.dependencies import get_llm_provider
+
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["id"]
+    try:
+        app.dependency_overrides[get_llm_provider] = lambda: _ScriptedLLM(
+            [LLMResponse(content="first", tool_calls=[], provider="test")]
+        )
+        turn1 = client.post(f"/sessions/{session_id}/messages", json={"content": "one"})
+        assert turn1.json()["status"] == "done"
+
+        # An out-of-band trace write, same shape as a CRASH or REAPED row:
+        # straight to the database, never through the graph.
+        repo.add_trace_event(db_pool, session_id, node="system", detail="SYSTEM ROW")
+        repo.update_session_status(db_pool, session_id, status="failed", final_answer="x")
+
+        app.dependency_overrides[get_llm_provider] = lambda: _ScriptedLLM(
+            [LLMResponse(content="second", tool_calls=[], provider="test")]
+        )
+        turn2 = client.post(f"/sessions/{session_id}/messages", json={"content": "two"})
+        assert turn2.status_code == 200
+        assert turn2.json()["status"] == "done"
+
+        events = repo.list_trace_events(db_pool, session_id)
+        planner_events = [e for e in events if e["node"] == "planner"]
+        assert len(planner_events) == 2, (
+            "turn 2's planner trace event was silently dropped (sequence "
+            f"collision with the out-of-band system row); events={events}"
+        )
     finally:
         del app.dependency_overrides[get_llm_provider]
         with db_pool.connection() as conn:
@@ -794,4 +855,68 @@ def test_approval_in_turn_two_pauses_and_resumes_correctly(db_pool) -> None:
         with db_pool.connection() as conn:
             conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
         create_checkpointer(db_pool).delete_thread(str(session_id))
-        create_checkpointer(db_pool).delete_thread(str(session_id))
+
+
+def test_trace_sequence_conflict_with_different_content_is_logged(db_pool, caplog) -> None:
+    """WP1/ADR-034: `ON CONFLICT DO NOTHING` silently drops a genuinely lost
+    event just as readily as it (correctly) no-ops a replay. A mismatch
+    between what's already at a sequence and what the graph just tried to
+    write there must be logged, not silent."""
+    session = repo.create_session(db_pool, task="conflict test")
+    session_id = session["id"]
+    repo.add_trace_event(db_pool, session_id, node="system", detail="existing row", sequence=1)
+    result = {
+        "status": "done",
+        "final_answer": "done",
+        "trace": [
+            {
+                "sequence": 1,
+                "node": "planner",
+                "detail": "a different event entirely",
+                "level": "info",
+                "provider": None,
+            }
+        ],
+    }
+    try:
+        with caplog.at_level(logging.WARNING, logger="agent_ops.session_runner"):
+            _apply_result(db_pool, session_id, result)
+
+        assert any("trace_sequence_conflict" in record.message for record in caplog.records)
+        # ON CONFLICT DO NOTHING really did nothing -- the original row survives.
+        events = repo.list_trace_events(db_pool, session_id)
+        assert len(events) == 1
+        assert events[0]["detail"] == "existing row"
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+
+
+def test_trace_sequence_conflict_with_identical_content_is_not_logged(db_pool, caplog) -> None:
+    """A genuine replay (the same node+detail landing at the same sequence
+    a second time) is expected and must stay silent -- this is what makes
+    re-applying an already-persisted graph result safe (ADR-024)."""
+    session = repo.create_session(db_pool, task="replay test")
+    session_id = session["id"]
+    repo.add_trace_event(db_pool, session_id, node="planner", detail="same event", sequence=1)
+    result = {
+        "status": "done",
+        "final_answer": "done",
+        "trace": [
+            {
+                "sequence": 1,
+                "node": "planner",
+                "detail": "same event",
+                "level": "info",
+                "provider": None,
+            }
+        ],
+    }
+    try:
+        with caplog.at_level(logging.WARNING, logger="agent_ops.session_runner"):
+            _apply_result(db_pool, session_id, result)
+
+        assert not any("trace_sequence_conflict" in record.message for record in caplog.records)
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))

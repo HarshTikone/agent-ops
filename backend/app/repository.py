@@ -327,6 +327,20 @@ def add_trace_event_on_connection(
     ).fetchone()
 
 
+def get_trace_event_by_sequence(
+    conn: DbConnection, session_id: UUID, sequence: int
+) -> dict[str, Any] | None:
+    """Looks up the row already occupying a `(session_id, sequence)` slot --
+    used to tell an idempotent replay apart from a genuine lost event when
+    `add_trace_event_on_connection`'s `ON CONFLICT DO NOTHING` fires (ADR-034)."""
+    return conn.execute(
+        "SELECT id, session_id, sequence, node, detail, level, provider, created_at, "
+        "started_at, duration_ms, tokens_in, tokens_out, cost_usd "
+        "FROM trace_events WHERE session_id = %s AND sequence = %s",
+        (session_id, sequence),
+    ).fetchone()
+
+
 def list_trace_events(pool: DbPool, session_id: UUID) -> list[dict[str, Any]]:
     with pool.connection() as conn:
         return conn.execute(

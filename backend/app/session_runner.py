@@ -9,6 +9,7 @@ requests except the checkpointed graph state itself.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any, cast
 from uuid import UUID
@@ -22,9 +23,11 @@ from langgraph.types import Command
 from app import repository as repo
 from app.db import DbConnection, DbPool
 from app.graph.build import build_graph
-from app.graph.state import GraphState, initial_state, resumed_state
+from app.graph.state import GraphState, TraceEvent, initial_state, resumed_state
 from app.llm.base import LLMProvider
 from app.tools.registry import build_tool_registry, to_langchain_tools
+
+logger = logging.getLogger("agent_ops.session_runner")
 
 
 def _thread_config(session_id: UUID) -> RunnableConfig:
@@ -58,9 +61,19 @@ def _build_graph_for_session(
 
 
 def _persist_new_trace_events(conn: DbConnection, session_id: UUID, trace: list[dict]) -> None:
-    """Insert by durable sequence; replaying the same graph result is safe."""
+    """Insert by durable sequence; replaying the same graph result is safe
+    thanks to `ON CONFLICT (session_id, sequence) DO NOTHING` (ADR-024).
+
+    That silence is right for a genuine replay (the same event landing a
+    second time), but a conflict can also mean a real event was just lost —
+    see ADR-034: a sequence number the checkpoint computed can collide with
+    a row written outside the graph entirely (a CRASH or REAPED event).
+    `continue_session_run` closes that gap at the source by seeding the next
+    turn's trace from the database, not the checkpoint, but this makes any
+    conflict that still slips through loud instead of silent.
+    """
     for event in trace:
-        repo.add_trace_event_on_connection(
+        inserted = repo.add_trace_event_on_connection(
             conn,
             session_id,
             sequence=event["sequence"],
@@ -74,6 +87,44 @@ def _persist_new_trace_events(conn: DbConnection, session_id: UUID, trace: list[
             tokens_out=event.get("tokens_out"),
             cost_usd=event.get("cost_usd"),
         )
+        if inserted is not None:
+            continue
+        existing = repo.get_trace_event_by_sequence(conn, session_id, event["sequence"])
+        if existing is not None and (existing["node"], existing["detail"]) == (
+            event["node"],
+            event["detail"],
+        ):
+            continue  # idempotent replay of the same event -- expected, not a problem
+        logger.warning(
+            "trace_sequence_conflict session_id=%s sequence=%s existing_node=%s new_node=%s",
+            session_id,
+            event["sequence"],
+            existing["node"] if existing else "<missing>",
+            event["node"],
+        )
+
+
+def _persisted_trace(pool: DbPool, session_id: UUID) -> list[TraceEvent]:
+    """The durable trace, as graph-state events. `trace_events` -- not the
+    checkpoint -- is the source of truth for sequence numbers (ADR-034):
+    rows written outside the graph (REAPED, CRASH) exist only there, so a
+    follow-up turn seeded from the checkpoint's own (shorter) trace list
+    would compute new sequence numbers that collide with them."""
+    return [
+        TraceEvent(
+            sequence=row["sequence"],
+            node=row["node"],
+            detail=row["detail"],
+            level=row["level"],
+            provider=row["provider"],
+            started_at=row["started_at"].isoformat() if row["started_at"] else None,
+            duration_ms=row["duration_ms"],
+            tokens_in=row["tokens_in"],
+            tokens_out=row["tokens_out"],
+            cost_usd=str(row["cost_usd"]) if row["cost_usd"] is not None else None,
+        )
+        for row in repo.list_trace_events(pool, session_id)
+    ]
 
 
 def _apply_result(pool: DbPool, session_id: UUID, result: dict[str, Any]) -> None:
@@ -174,6 +225,14 @@ def continue_session_run(
     # when starting fresh), so an empty prior falls back to initial_state
     # instead, exactly what start_session_run would have done here.
     next_state = resumed_state(cast(GraphState, prior), task) if prior else initial_state(task)
+    # ADR-034: trace_events, not the checkpoint, is the source of truth for
+    # sequence numbers -- a CRASH or REAPED row written straight to the
+    # database (never through the graph) leaves the checkpoint's trace
+    # shorter than the database's real row count, so seeding from either
+    # `resumed_state` or `initial_state` above computes the next event's
+    # sequence at a number a database row already occupies. Overwriting
+    # with the database's own trace here closes that gap at the source.
+    next_state["trace"] = _persisted_trace(pool, session_id)
     result = cast(
         dict[str, Any],
         graph.invoke(next_state, config=_thread_config(session_id)),
