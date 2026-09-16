@@ -40,6 +40,23 @@ def test_evaluates_supported_expressions(
     assert calculator.run(expression=expression) == expected
 
 
+def test_binary_float_noise_is_trimmed_to_twelve_significant_digits(
+    calculator: CalculatorTool,
+) -> None:
+    """The motivating bug: `1842 * 0.70` evaluates to `1289.3999999999999`
+    in raw Python float arithmetic. The tool's own output must already be
+    clean -- not clean only because the finalize model happens to tidy it."""
+    assert calculator.run(expression="1842 * 0.70") == "1289.4"
+
+
+def test_integral_float_result_is_formatted_as_an_integer(calculator: CalculatorTool) -> None:
+    assert calculator.run(expression="8 / 2") == "4"
+
+
+def test_non_integral_division_keeps_useful_precision(calculator: CalculatorTool) -> None:
+    assert calculator.run(expression="1 / 3") == "0.333333333333"
+
+
 def test_malformed_expression_raises_permanent_tool_error(calculator: CalculatorTool) -> None:
     with pytest.raises(ToolError) as exc_info:
         calculator.run(expression="2 + * 3")

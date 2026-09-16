@@ -1944,3 +1944,44 @@ and reaping it would silently kill a pending approval.
 - A `running` session's `updated_at` is the only signal available; there is
   no heartbeat distinguishing "the process is still working" from "the
   process is dead," so the threshold is a proxy for the latter, not proof.
+
+---
+
+## ADR-032: The calculator formats its own output; float noise is a tool bug, not a display bug
+
+**Date:** 2026-09-16 (post-release housekeeping)
+
+**Context**
+
+`CalculatorTool.run` returned `str(result)` directly. For `1842 * 0.70`
+that is `"1289.3999999999999"` — correct binary floating-point arithmetic,
+wrong as a persisted trace value. The finalize model has been quietly
+rewriting this to `"1289.4"` in its final_answer prose, which hid the defect:
+the demo has always looked right because a *different* component patched
+over it, not because the tool's own output was correct. ARCHITECTURE.md §0's
+framing is that the trace IS the product; a trace row this project asks a
+user to trust should not need an LLM downstream to make it presentable.
+
+**Decision**
+
+`_format_result` runs at the tool's own output boundary, before the string
+ever reaches `trace_events` or the finalize model. An integral float (`8 /
+2` → `4.0`) is rendered as a plain integer, `"4"`, not `"4.0"` — division
+producing a whole number is not a case where fractional precision has
+anything left to express. Everything else is trimmed to `.12g` (12
+significant digits): enough precision to stay useful (`1 / 3` →
+`"0.333333333333"`) while discarding the representation noise past what any
+real arithmetic task in this project's tool set needs. Plain `int` results
+(`2 ** 10` → `"1024"`) are untouched — they were already exact.
+
+**What we gave up**
+
+- 12 significant digits is a fixed, chosen bound, not derived from any
+  specific downstream precision requirement — a hypothetical task needing
+  13+ digits of exactness would silently lose precision at the trace
+  boundary (none of this project's tool set does; `round`/`abs`/`min`/`max`
+  and the four arithmetic operators have no such use case today).
+- `float('inf')`/`nan` results (reachable via silent float overflow in
+  multiplication, which Python does not raise on) are not special-cased;
+  `.12g` renders them as `"inf"`/`"nan"`, matching Python's own repr rather
+  than a more explicit tool-level error.

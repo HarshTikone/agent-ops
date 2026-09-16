@@ -118,6 +118,22 @@ def _eval_node(node: ast.AST, depth: int = 0) -> float:
     raise ToolError(f"disallowed expression element: {ast.dump(node)}", transient=False)
 
 
+def _format_result(result: float) -> str:
+    """Binary floating point accumulates representation noise Python's own
+    arithmetic doesn't hide until str() is called -- `1842 * 0.70` evaluates
+    to `1289.3999999999999`, not `1289.4`. The trace is the product (this
+    project's own framing), so it gets formatted here rather than left for
+    the finalize model to quietly tidy up. Integral floats become plain
+    integers (`8 / 2` -> `"4"`, not `"4.0"`); everything else keeps ~12
+    significant digits, enough precision to stay useful (`1 / 3` ->
+    `"0.333333333333"`) without exposing float noise."""
+    if isinstance(result, int):
+        return str(result)
+    if result.is_integer():
+        return str(int(result))
+    return f"{result:.12g}"
+
+
 class CalculatorTool:
     name = "calculator"
     description = (
@@ -159,4 +175,4 @@ class CalculatorTool:
             ) from exc
         except (TypeError, OverflowError, ValueError) as exc:
             raise ToolError(f"evaluation error in {expression!r}: {exc}", transient=False) from exc
-        return str(result)
+        return _format_result(result)
