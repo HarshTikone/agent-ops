@@ -27,7 +27,7 @@ from typing import Any
 
 from app import repository as repo
 from app.config import get_settings
-from app.db import create_db_pool
+from app.db import DbPool, create_db_pool
 
 _FIXTURE_MARKERS = ("qa_", "p2_verify_", "interview_")
 _FIXTURE_EXACT_TASKS = {"do something"}
@@ -71,6 +71,27 @@ def _print_plan(plan: list[tuple[dict[str, Any], str]]) -> None:
         )
 
 
+def apply_archival(pool: DbPool, plan: list[tuple[dict[str, Any], str]]) -> int:
+    """Applies an archive plan for real -- the write half of `main()` (WP3,
+    Sprint 04), split out so it's directly callable, and testable against a
+    real database, without argparse or pool setup. Returns how many
+    sessions were archived."""
+    for session, _reason in plan:
+        repo.archive_session(pool, session["id"])
+    return len(plan)
+
+
+def restore_all(pool: DbPool) -> list[dict[str, Any]]:
+    """Restores every currently-archived session -- the write half of
+    `--restore-all` (WP3, Sprint 04), split out for the same reason as
+    `apply_archival`. Returns the sessions that were restored."""
+    sessions = repo.list_sessions_for_maintenance(pool)
+    archived = [session for session in sessions if session["archived_at"] is not None]
+    for session in archived:
+        repo.restore_session(pool, session["id"])
+    return archived
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -88,28 +109,25 @@ def main() -> None:
     pool = create_db_pool(settings)
     pool.open(wait=True, timeout=10)
     try:
-        sessions = repo.list_sessions_for_maintenance(pool)
-
         if args.restore_all:
-            archived = [session for session in sessions if session["archived_at"] is not None]
-            if not archived:
+            restored = restore_all(pool)
+            if not restored:
                 print("No archived sessions to restore.")
                 return
-            for session in archived:
-                repo.restore_session(pool, session["id"])
+            for session in restored:
                 print(f"restored {session['id']}")
-            print(f"Restored {len(archived)} session(s).")
+            print(f"Restored {len(restored)} session(s).")
             return
 
+        sessions = repo.list_sessions_for_maintenance(pool)
         plan = plan_archival(sessions)
         _print_plan(plan)
         if not args.apply:
             print("\nDry run only -- pass --apply to archive these sessions for real.")
             return
 
-        for session, _reason in plan:
-            repo.archive_session(pool, session["id"])
-        print(f"\nArchived {len(plan)} session(s).")
+        archived_count = apply_archival(pool, plan)
+        print(f"\nArchived {archived_count} session(s).")
     finally:
         pool.close()
 

@@ -1,12 +1,23 @@
-"""Pure classification tests for scripts/reap_sessions.py -- no database
-needed, since reap_action/plan_reap take plain dicts and a fixed `now`."""
+"""Tests for scripts/reap_sessions.py: pure classification (no database
+needed, since reap_action/plan_reap take plain dicts and a fixed `now`),
+plus DB-backed coverage (WP3, Sprint 04) for apply_reap -- the write path
+the pure tests above can't reach."""
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from scripts.reap_sessions import CREATED_STALE_AFTER, RUNNING_STALE_AFTER, plan_reap, reap_action
+from app import repository as repo
+from scripts import reap_sessions
+from scripts.reap_sessions import (
+    _INTERRUPTED_MESSAGE,
+    CREATED_STALE_AFTER,
+    RUNNING_STALE_AFTER,
+    apply_reap,
+    plan_reap,
+    reap_action,
+)
 
 _NOW = datetime(2026, 9, 16, 12, 0, 0, tzinfo=UTC)
 
@@ -101,3 +112,127 @@ def test_plan_reap_returns_only_actionable_sessions_with_reasons() -> None:
     actions_by_id = {session["id"]: action for session, action, _reason in plan}
     assert actions_by_id[stale_running["id"]] == "fail"
     assert actions_by_id[stale_created["id"]] == "archive"
+
+
+# --- DB-backed: the write path (WP3, Sprint 04) -------------------------
+
+
+def _backdate(db_pool, session_id, *, column: str, to) -> None:
+    # `column` is always a literal ("updated_at"/"created_at") from a call
+    # site in this file, never external input.
+    with db_pool.connection() as conn:
+        conn.execute(f"UPDATE sessions SET {column} = %s WHERE id = %s", (to, session_id))
+
+
+def test_apply_reap_fails_a_stale_running_session(db_pool) -> None:
+    session = repo.create_session(db_pool, task="stale running task")
+    session_id = session["id"]
+    stale = datetime.now(UTC) - RUNNING_STALE_AFTER - timedelta(minutes=1)
+    _backdate(db_pool, session_id, column="updated_at", to=stale)
+    try:
+        target = next(
+            s for s in repo.list_sessions_for_maintenance(db_pool) if s["id"] == session_id
+        )
+        plan = plan_reap([target], now=datetime.now(UTC))
+        assert len(plan) == 1
+
+        applied = apply_reap(db_pool, plan)
+
+        assert applied == 1
+        final = repo.get_session(db_pool, session_id)
+        assert final["status"] == "failed"
+        assert final["final_answer"] == _INTERRUPTED_MESSAGE
+        events = repo.list_trace_events(db_pool, session_id)
+        reaped = [e for e in events if e["node"] == "system" and "REAPED" in e["detail"]]
+        assert len(reaped) == 1
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+
+
+def test_apply_reap_archives_a_stale_created_session(db_pool) -> None:
+    session = repo.create_session(db_pool)  # blank task -> 'created'
+    session_id = session["id"]
+    stale = datetime.now(UTC) - CREATED_STALE_AFTER - timedelta(hours=1)
+    _backdate(db_pool, session_id, column="created_at", to=stale)
+    try:
+        target = next(
+            s for s in repo.list_sessions_for_maintenance(db_pool) if s["id"] == session_id
+        )
+        plan = plan_reap([target], now=datetime.now(UTC))
+        assert len(plan) == 1
+
+        applied = apply_reap(db_pool, plan)
+
+        assert applied == 1
+        final = repo.get_session(db_pool, session_id)
+        assert final["archived_at"] is not None
+        assert final["status"] == "created"  # archived, not failed -- it never ran
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+
+
+def test_apply_reap_skips_a_session_that_changed_since_being_read(db_pool) -> None:
+    """WP2/ADR-035's compare-and-swap, exercised through the script's own
+    apply path this time, not the repository function directly."""
+    session = repo.create_session(db_pool, task="stale running task")
+    session_id = session["id"]
+    stale = datetime.now(UTC) - RUNNING_STALE_AFTER - timedelta(minutes=1)
+    _backdate(db_pool, session_id, column="updated_at", to=stale)
+    try:
+        target = next(
+            s for s in repo.list_sessions_for_maintenance(db_pool) if s["id"] == session_id
+        )
+        plan = plan_reap([target], now=datetime.now(UTC))
+
+        # The run finishes for real between the read above and apply_reap below.
+        repo.update_session_status(
+            db_pool, session_id, status="done", final_answer="finished first"
+        )
+
+        applied = apply_reap(db_pool, plan)
+
+        assert applied == 0
+        final = repo.get_session(db_pool, session_id)
+        assert final["status"] == "done"
+        assert final["final_answer"] == "finished first"
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+
+
+def test_main_dry_run_writes_nothing(db_pool, monkeypatch, capsys) -> None:
+    """CLI flag wiring smoke test: with no --apply, main() must print a plan
+    and leave the database untouched."""
+    session = repo.create_session(db_pool, task="not stale yet")
+    session_id = session["id"]
+    try:
+        monkeypatch.setattr("sys.argv", ["reap_sessions"])
+        reap_sessions.main()
+
+        output = capsys.readouterr().out
+        assert "Dry run only" in output or "Nothing to reap" in output
+        final = repo.get_session(db_pool, session_id)
+        assert final["status"] == "running"
+        assert final["archived_at"] is None
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+
+
+def test_main_apply_reaps_for_real(db_pool, monkeypatch, capsys) -> None:
+    session = repo.create_session(db_pool, task="stale running task")
+    session_id = session["id"]
+    stale = datetime.now(UTC) - RUNNING_STALE_AFTER - timedelta(minutes=1)
+    _backdate(db_pool, session_id, column="updated_at", to=stale)
+    try:
+        monkeypatch.setattr("sys.argv", ["reap_sessions", "--apply"])
+        reap_sessions.main()
+
+        output = capsys.readouterr().out
+        assert "Reaped" in output
+        assert repo.get_session(db_pool, session_id)["status"] == "failed"
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))

@@ -37,7 +37,7 @@ from typing import Any
 
 from app import repository as repo
 from app.config import get_settings
-from app.db import create_db_pool
+from app.db import DbPool, create_db_pool
 
 RUNNING_STALE_AFTER = timedelta(minutes=15)
 CREATED_STALE_AFTER = timedelta(days=1)
@@ -86,6 +86,41 @@ def _print_plan(plan: list[tuple[dict[str, Any], str, str]]) -> None:
         print(f"  {session['id']}  {action:<8}  {reason:<40}  {session['task'][:40]!r}")
 
 
+def apply_reap(pool: DbPool, plan: list[tuple[dict[str, Any], str, str]]) -> int:
+    """Applies a reap plan for real -- the write half of `main()` (WP3,
+    Sprint 04), split out so it's directly callable, and testable against a
+    real database, without argparse or pool setup. Returns how many
+    sessions were actually reaped: a 'fail' action whose compare-and-swap
+    loses the race (the session changed since being read, WP2/ADR-035) is
+    skipped rather than counted, and reported as such; `len(plan) -
+    apply_reap(...)` is always exactly the number skipped."""
+    applied = 0
+    for session, action, reason in plan:
+        if action == "fail":
+            # Compare-and-swap (WP2, ADR-035): only writes if the session
+            # is still 'running' with the exact updated_at just read --
+            # closes the gap between reading it as stale and writing to
+            # it, during which the run could have genuinely finished.
+            succeeded = repo.fail_stale_running_session(
+                pool,
+                session["id"],
+                expected_updated_at=session["updated_at"],
+                final_answer=_INTERRUPTED_MESSAGE,
+                reason=reason,
+            )
+            if succeeded:
+                applied += 1
+            else:
+                print(
+                    f"  skipped {session['id']} -- changed since it was read "
+                    "(still running, or finished in the meantime)"
+                )
+        else:
+            repo.archive_session(pool, session["id"])
+            applied += 1
+    return applied
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true", help="reap the planned sessions for real")
@@ -105,32 +140,8 @@ def main() -> None:
             print("\nDry run only -- pass --apply to reap these sessions for real.")
             return
 
-        applied = 0
-        skipped = 0
-        for session, action, reason in plan:
-            if action == "fail":
-                # Compare-and-swap (WP2, ADR-035): only writes if the session
-                # is still 'running' with the exact updated_at just read --
-                # closes the gap between reading it as stale and writing to
-                # it, during which the run could have genuinely finished.
-                succeeded = repo.fail_stale_running_session(
-                    pool,
-                    session["id"],
-                    expected_updated_at=session["updated_at"],
-                    final_answer=_INTERRUPTED_MESSAGE,
-                    reason=reason,
-                )
-                if succeeded:
-                    applied += 1
-                else:
-                    skipped += 1
-                    print(
-                        f"  skipped {session['id']} -- changed since it was read "
-                        "(still running, or finished in the meantime)"
-                    )
-            else:
-                repo.archive_session(pool, session["id"])
-                applied += 1
+        applied = apply_reap(pool, plan)
+        skipped = len(plan) - applied
         skip_note = f" ({skipped} skipped -- changed since being read)" if skipped else ""
         print(f"\nReaped {applied} session(s).{skip_note}")
     finally:
