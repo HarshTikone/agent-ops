@@ -375,3 +375,19 @@ dry-run-by-default maintenance script in the same family as
 `scripts/migrate.py`, not a database trigger or an API-request-time check —
 so the judgment call of "is this a QA fixture" is reviewable as printed
 output before anything is written, with `--restore-all` as the undo.
+
+## 13. Stranded-session reaping
+
+`send_message`'s crash handler (ADR-020) only catches an exception *inside*
+a request it is running — it cannot catch a killed container, so a session
+can still strand `running` forever if the process dies mid-request, or sit
+`created` forever if a client abandons it before the first message.
+`scripts/reap_sessions.py` (ADR-031) covers both, in the same
+pure-classification-plus-dry-run shape as the archiver: a `running` session
+untouched for over 15 minutes is marked `failed` with an honest
+final_answer; a `created` session over a day old is archived via the same
+`repo.archive_session` the archiving endpoints use. `awaiting_approval` is
+never a match for either rule — a deliberately long-lived state waiting on
+a human, not a stranding failure mode. Deliberately a script, not a startup
+sweep: with more than one instance a startup sweep races itself, and it
+would fire mid-deploy against a run that is genuinely still in flight.

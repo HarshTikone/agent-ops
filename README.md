@@ -47,6 +47,12 @@ uvicorn app.main:app --reload
 heuristics would soft-archive, without changing anything; add `--apply` to
 archive them for real, or `--restore-all` to undo every archive in one shot.
 
+`python -m scripts.reap_sessions` prints which sessions look stranded — a
+`running` session with no update in over 15 minutes, or a `created` session
+never messaged in over a day — without changing anything; add `--apply` to
+mark the stalled ones `failed` and archive the never-messaged ones for real.
+It never touches `awaiting_approval` sessions.
+
 Set an `AGENT_OPS_API_KEY` containing at least 32 bytes, then check the service with
 `curl http://localhost:8000/health` and
 `curl http://localhost:8000/health/ready` (the second reports which of

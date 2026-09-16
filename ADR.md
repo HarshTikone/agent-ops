@@ -1900,3 +1900,47 @@ shape as `scripts/migrate.py`, deliberately not part of API startup, with a
   this trades storage for the audit trail every session's trace represents.
 - No scheduled job runs the archiver — it stays a manual, reviewed step
   after each deploy that adds fixture noise, not an automatic sweep.
+
+---
+
+## ADR-031: Stranded sessions are reaped by a script, not a startup sweep
+
+**Date:** 2026-09-16 (post-release housekeeping)
+
+**Context**
+
+A session can strand two ways: it stays `created` and is never messaged, or
+it stays `running` because the process died *outside* `send_message`'s own
+`try`/`except` (ADR-020's C4 fix) — a killed container mid-request, not an
+exception the request handler ever got a chance to catch. Production had a
+live example: a `running` session untouched for days after whatever request
+created it never returned. A sweep on API startup was considered and
+rejected — with more than one instance, a startup sweep races itself, and it
+would fire mid-deploy while a legitimate run is genuinely in flight, which is
+exactly the session it must not touch.
+
+**Decision**
+
+`scripts/reap_sessions.py`, shaped like `scripts/archive_sessions.py`: pure
+classification (`reap_action`/`plan_reap`) separate from I/O, dry-run by
+default. A `running` session untouched (by `updated_at`) for over 15 minutes
+— generously above the slowest observed real run plus Render cold start —
+is marked `failed` with an honest final_answer saying the run was
+interrupted; the app's requests are fully synchronous, so `running` this
+long without a status change did not just get unlucky. A `created` session
+over a day old is archived, not failed — it never ran, so there is nothing
+to report as a failure. `awaiting_approval` is never a match for either
+rule: that state is legitimately long-lived, waiting on a human by design,
+and reaping it would silently kill a pending approval.
+
+**What we gave up**
+
+- Both thresholds (15 minutes, one day) are fixed constants, not derived
+  from observed run-time distributions or made configurable; a task type
+  that legitimately runs longer than 15 minutes would be reaped mid-flight.
+- Like the archiver, nothing schedules this automatically — it stays a
+  manual, reviewed step, so a stranded session can sit for a while before
+  someone thinks to run it.
+- A `running` session's `updated_at` is the only signal available; there is
+  no heartbeat distinguishing "the process is still working" from "the
+  process is dead," so the threshold is a proxy for the latter, not proof.
