@@ -181,6 +181,7 @@ export interface Session {
   task: string
   status: SessionStatus
   final_answer: string | null
+  archived_at: string | null
   created_at: string
   updated_at: string
   pending_action: PendingAction | null
@@ -268,12 +269,23 @@ export function createSession(signal?: AbortSignal): Promise<Session> {
   return request<Session>('/sessions', { method: 'POST', signal })
 }
 
-export function listSessions(signal?: AbortSignal): Promise<Session[]> {
-  return request<Session[]>('/sessions', { signal })
+export function listSessions(signal?: AbortSignal, includeArchived = false): Promise<Session[]> {
+  const query = includeArchived ? '?include_archived=true' : ''
+  return request<Session[]>(`/sessions${query}`, { signal })
 }
 
 export function getSession(sessionId: string, signal?: AbortSignal): Promise<Session> {
   return request<Session>(`/sessions/${sessionId}`, { signal })
+}
+
+/** Soft-archives a session (ADR-030): it drops out of the default
+ * `listSessions()` result but still opens directly by id. */
+export function archiveSession(sessionId: string, signal?: AbortSignal): Promise<Session> {
+  return request<Session>(`/sessions/${sessionId}/archive`, { method: 'POST', signal })
+}
+
+export function restoreSession(sessionId: string, signal?: AbortSignal): Promise<Session> {
+  return request<Session>(`/sessions/${sessionId}/restore`, { method: 'POST', signal })
 }
 
 export function getTrace(sessionId: string, signal?: AbortSignal): Promise<TraceEvent[]> {

@@ -101,7 +101,7 @@ def send_message(
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
 
-    # ADR-030 supersedes ADR-015's one-task-per-session boundary: a
+    # ADR-033 supersedes ADR-015's one-task-per-session boundary: a
     # session's FIRST message starts its one graph run (start_session); a
     # message to a session that already finished a prior turn (done/
     # degraded/failed) starts a follow-up one on the same thread instead

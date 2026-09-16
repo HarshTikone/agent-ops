@@ -3,12 +3,14 @@ import {
   API_BASE_URL,
   ApiError,
   approvePendingAction,
+  archiveSession,
   createSession,
   getSession,
   clearOperatorKey,
   getTrace,
   listSessions,
   rejectPendingAction,
+  restoreSession,
   sendMessage,
   setOperatorKey,
 } from './api'
@@ -146,6 +148,33 @@ describe('api request helper (via the session/approval functions)', () => {
     const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]!
     expect(url).toBe(`${API_BASE_URL}/sessions`)
     expect(init.method).toBeUndefined()
+  })
+
+  it('listSessions includes archived sessions when asked', async () => {
+    ;(fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => [] })
+    await listSessions(undefined, true)
+    const [url] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]!
+    expect(url).toBe(`${API_BASE_URL}/sessions?include_archived=true`)
+  })
+
+  it('archiveSession POSTs to the archive endpoint', async () => {
+    const session = { id: 's1', status: 'done', archived_at: '2026-09-16T00:00:00Z' }
+    ;(fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => session })
+    await expect(archiveSession('s1')).resolves.toEqual(session)
+    expect(fetch).toHaveBeenCalledWith(
+      `${API_BASE_URL}/sessions/s1/archive`,
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
+  it('restoreSession POSTs to the restore endpoint', async () => {
+    const session = { id: 's1', status: 'done', archived_at: null }
+    ;(fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => session })
+    await expect(restoreSession('s1')).resolves.toEqual(session)
+    expect(fetch).toHaveBeenCalledWith(
+      `${API_BASE_URL}/sessions/s1/restore`,
+      expect.objectContaining({ method: 'POST' }),
+    )
   })
 
   it('does not issue a read when the caller signal is already aborted', async () => {

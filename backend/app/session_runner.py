@@ -149,7 +149,7 @@ def continue_session_run(
     tavily_api_key: str,
     http_client: httpx.Client | None = None,
 ) -> None:
-    """The multi-turn sibling of `start_session_run` (ADR-030): loads the
+    """The multi-turn sibling of `start_session_run` (ADR-033): loads the
     prior turn's checkpointed state via `graph.get_state` rather than
     starting from `initial_state`, so a follow-up message builds on the
     messages and trace the agent already produced instead of starting a

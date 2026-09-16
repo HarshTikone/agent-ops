@@ -8,7 +8,13 @@ import type { Session } from '../lib/api'
 
 vi.mock('../lib/api', async () => {
   const actual = await vi.importActual<typeof api>('../lib/api')
-  return { ...actual, listSessions: vi.fn(), createSession: vi.fn() }
+  return {
+    ...actual,
+    listSessions: vi.fn(),
+    createSession: vi.fn(),
+    archiveSession: vi.fn(),
+    restoreSession: vi.fn(),
+  }
 })
 
 function makeSession(overrides: Partial<Session> = {}): Session {
@@ -17,6 +23,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     task: 'a task',
     status: 'done',
     final_answer: 'an answer',
+    archived_at: null,
     created_at: '2026-08-24T00:00:00Z',
     updated_at: '2026-08-24T00:00:00Z',
     pending_action: null,
@@ -37,12 +44,10 @@ function renderPage() {
 
 describe('SessionListPage', () => {
   beforeEach(() => {
-    localStorage.clear()
     vi.mocked(api.listSessions).mockReturnValue(new Promise(() => {}))
   })
 
   afterEach(() => {
-    localStorage.clear()
     vi.clearAllMocks()
   })
 
@@ -109,49 +114,66 @@ describe('SessionListPage', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('rate limited')
     expect(screen.getByRole('button', { name: 'New session' })).toBeEnabled()
   })
-  it('removes a session card from the list when its remove button is clicked', async () => {
+
+  it('archives a session card and removes it from the (unarchived) list', async () => {
     vi.mocked(api.listSessions).mockResolvedValue([
       makeSession({ id: 'aaaa1111', task: 'keep me' }),
-      makeSession({ id: 'bbbb2222', task: 'remove me' }),
+      makeSession({ id: 'bbbb2222', task: 'archive me' }),
     ])
+    vi.mocked(api.archiveSession).mockResolvedValue(
+      makeSession({ id: 'bbbb2222', task: 'archive me', archived_at: '2026-09-16T00:00:00Z' }),
+    )
     const user = userEvent.setup()
     renderPage()
 
-    expect(await screen.findByText('remove me')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Hide session 2222 on this device' }))
+    expect(await screen.findByText('archive me')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Archive session 2222' }))
 
-    expect(screen.queryByText('remove me')).not.toBeInTheDocument()
-    expect(screen.getByText('keep me')).toBeInTheDocument()
-    expect(screen.getByRole('status')).toHaveTextContent('2222 is hidden on this device')
-    expect(localStorage.getItem('agent-ops.hidden-sessions')).toBe('["bbbb2222"]')
-    // Removal is list-local: it must not navigate into the session.
+    expect(api.archiveSession).toHaveBeenCalledWith('bbbb2222')
+    expect(await screen.findByText('keep me')).toBeInTheDocument()
+    expect(screen.queryByText('archive me')).not.toBeInTheDocument()
+    // Archiving is list-local: it must not navigate into the session.
     expect(screen.queryByText('Session detail placeholder')).not.toBeInTheDocument()
-
-    await user.click(screen.getByRole('button', { name: 'Undo' }))
-    expect(screen.getByText('remove me')).toBeInTheDocument()
-    expect(localStorage.getItem('agent-ops.hidden-sessions')).toBe('[]')
   })
 
-  it('keeps locally hidden sessions out of the list after a reload and lets them be restored', async () => {
-    localStorage.setItem('agent-ops.hidden-sessions', '["bbbb2222"]')
-    vi.mocked(api.listSessions).mockResolvedValue([
-      makeSession({ id: 'aaaa1111', task: 'visible task' }),
-      makeSession({ id: 'bbbb2222', task: 'hidden task' }),
-    ])
-
+  it('shows an error and keeps the card when archiving fails', async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([makeSession({ id: 'aaaa1111', task: 'mine' })])
+    vi.mocked(api.archiveSession).mockRejectedValue(new Error('rate limited'))
+    const user = userEvent.setup()
     renderPage()
 
-    expect(await screen.findByText('visible task')).toBeInTheDocument()
-    expect(screen.queryByText('hidden task')).not.toBeInTheDocument()
-    expect(screen.getByRole('status')).toHaveTextContent('1 session hidden on this device')
+    await screen.findByText('mine')
+    await user.click(screen.getByRole('button', { name: 'Archive session 1111' }))
 
+    expect(await screen.findByRole('alert')).toHaveTextContent('rate limited')
+    expect(screen.getByText('mine')).toBeInTheDocument()
+  })
+
+  it('fetches archived sessions when the toggle is checked, and lets one be restored', async () => {
+    vi.mocked(api.listSessions).mockResolvedValueOnce([
+      makeSession({ id: 'aaaa1111', task: 'visible task' }),
+    ])
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Show all hidden sessions' }))
+    renderPage()
+    await screen.findByText('visible task')
 
-    expect(screen.getByText('hidden task')).toBeInTheDocument()
-    expect(
-      screen.queryByRole('button', { name: 'Show all hidden sessions' }),
-    ).not.toBeInTheDocument()
-    expect(localStorage.getItem('agent-ops.hidden-sessions')).toBe('[]')
+    vi.mocked(api.listSessions).mockResolvedValueOnce([
+      makeSession({ id: 'aaaa1111', task: 'visible task' }),
+      makeSession({ id: 'bbbb2222', task: 'archived task', archived_at: '2026-09-16T00:00:00Z' }),
+    ])
+    await user.click(screen.getByRole('checkbox', { name: 'Show archived sessions' }))
+
+    expect(await screen.findByText('archived task')).toBeInTheDocument()
+    expect(api.listSessions).toHaveBeenLastCalledWith(expect.any(AbortSignal), true)
+    expect(screen.getByText('Archived')).toBeInTheDocument()
+
+    vi.mocked(api.restoreSession).mockResolvedValue(
+      makeSession({ id: 'bbbb2222', task: 'archived task', archived_at: null }),
+    )
+    await user.click(screen.getByRole('button', { name: 'Restore' }))
+
+    expect(api.restoreSession).toHaveBeenCalledWith('bbbb2222')
+    await screen.findByText('archived task')
+    expect(screen.queryByText('Archived')).not.toBeInTheDocument()
   })
 })

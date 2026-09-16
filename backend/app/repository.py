@@ -69,7 +69,7 @@ def start_session(pool: DbPool, session_id: UUID, *, task: str) -> dict[str, Any
 
 def restart_session(pool: DbPool, session_id: UUID, *, task: str) -> dict[str, Any] | None:
     """Sibling to `start_session` for a session's SECOND (or later) message
-    (ADR-030 supersedes ADR-015's one-task-per-session boundary): only
+    (ADR-033 supersedes ADR-015's one-task-per-session boundary): only
     succeeds if the session reached a terminal, answer-or-failure-bearing
     status from a prior turn. A session still 'running' or
     'awaiting_approval' is genuinely mid-flight -- a second message there

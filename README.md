@@ -68,7 +68,7 @@ live in Postgres — `POST /sessions`, `GET /sessions`,
 for how the approval pause survives across separate requests.
 
 A session accepts a follow-up message once it reaches `done`, `degraded`, or
-`failed` (ADR-030) — the agent keeps its prior messages and notes for that
+`failed` (ADR-033) — the agent keeps its prior messages and notes for that
 session, so a second message can build on the first. `running` and
 `awaiting_approval` still reject a second message with a 409; a session is
 never mid-flight across two requests in this fully synchronous design.

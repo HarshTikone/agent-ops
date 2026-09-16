@@ -4,7 +4,7 @@ import type { Session, SessionStatus } from '../lib/api'
 const MAX_MESSAGE_LENGTH = 8_000
 
 // A session reaching one of these can still take a follow-up message
-// (ADR-030 supersedes ADR-015's one-task-per-session boundary): the prior
+// (ADR-033 supersedes ADR-015's one-task-per-session boundary): the prior
 // turn's messages and trace carry forward, so the agent can build on what
 // it already did and said. 'running' and 'awaiting_approval' are genuinely
 // mid-flight -- a message there would 409, so no compose box for those.
@@ -89,7 +89,7 @@ function MessageComposer({
  * message becomes the task and starts the one graph run). Every other
  * status shows the task/answer transcript; a terminal one (done/degraded/
  * failed) additionally shows a follow-up composer below it, since those can
- * still take a new message (ADR-030).
+ * still take a new message (ADR-033).
  */
 export function ChatPanel({
   session,

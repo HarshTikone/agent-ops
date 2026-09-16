@@ -394,7 +394,7 @@ would fire mid-deploy against a run that is genuinely still in flight.
 
 ## 14. Multi-turn sessions
 
-`send_message` (ADR-030) tries `repo.start_session` (the original `'created'`
+`send_message` (ADR-033) tries `repo.start_session` (the original `'created'`
 gate) and then `repo.restart_session` (`WHERE status IN ('done', 'degraded',
 'failed')`); only `running`/`awaiting_approval` still 409. A restarted
 session runs through `session_runner.continue_session_run` instead of

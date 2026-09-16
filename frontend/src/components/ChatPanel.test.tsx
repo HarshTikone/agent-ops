@@ -157,7 +157,7 @@ describe('ChatPanel', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('message response was interrupted')
   })
 
-  describe('follow-up messages on a terminal session (ADR-030)', () => {
+  describe('follow-up messages on a terminal session (ADR-033)', () => {
     const restartableStatuses = ['done', 'degraded', 'failed'] as const
     for (const status of restartableStatuses) {
       it(`shows a follow-up composer when the session is ${status}`, () => {

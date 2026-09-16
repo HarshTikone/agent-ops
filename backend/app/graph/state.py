@@ -145,7 +145,7 @@ def initial_state(task: str) -> GraphState:
 
 def resumed_state(prior: GraphState, task: str) -> GraphState:
     """Starts a new turn on a session that already reached a terminal status
-    (ADR-030 supersedes ADR-015's one-task-per-session boundary): keeps
+    (ADR-033 supersedes ADR-015's one-task-per-session boundary): keeps
     `messages` (with the new task appended as a `HumanMessage`, so the
     planner sees it) and `trace` (so trace sequence numbers keep climbing
     instead of restarting at 1) from the prior turn, and resets every other
