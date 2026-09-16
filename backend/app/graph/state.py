@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal, TypedDict
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 
 from app.llm.base import ToolCallRequest
 
@@ -140,4 +140,41 @@ def initial_state(task: str) -> GraphState:
         status="running",
         final_answer=None,
         trace=[],
+    )
+
+
+def resumed_state(prior: GraphState, task: str) -> GraphState:
+    """Starts a new turn on a session that already reached a terminal status
+    (ADR-030 supersedes ADR-015's one-task-per-session boundary): keeps
+    `messages` (with the new task appended as a `HumanMessage`, so the
+    planner sees it) and `trace` (so trace sequence numbers keep climbing
+    instead of restarting at 1) from the prior turn, and resets every other
+    field to what `initial_state` would give a brand-new session — a
+    follow-up turn is a fresh planning run, just one with history.
+
+    Returns a COMPLETE state dict, not a partial update, deliberately: an
+    `.invoke()` on a thread whose checkpoint already exists could in
+    principle merge a partial dict against the checkpointed values field by
+    field (LangGraph's default per-channel behavior for a `TypedDict` state
+    with no reducer is "last value wins", i.e. whatever value the checkpoint
+    holds survives to the invoke if not passed here — but that must not be
+    relied on to infer this design without being checked against the
+    installed version). Supplying every field here removes the question
+    entirely: whichever way the merge works, this IS the resulting state.
+    """
+    return GraphState(
+        task=task,
+        messages=[*prior["messages"], HumanMessage(content=task)],
+        plan=[],
+        step_index=0,
+        step_attempts=0,
+        replans=0,
+        tool_calls_made=0,
+        last_result=None,
+        last_failure=None,
+        last_failure_transient=None,
+        next_action="",
+        status="running",
+        final_answer=None,
+        trace=prior["trace"],
     )

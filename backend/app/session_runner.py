@@ -22,7 +22,7 @@ from langgraph.types import Command
 from app import repository as repo
 from app.db import DbConnection, DbPool
 from app.graph.build import build_graph
-from app.graph.state import initial_state
+from app.graph.state import GraphState, initial_state, resumed_state
 from app.llm.base import LLMProvider
 from app.tools.registry import build_tool_registry, to_langchain_tools
 
@@ -135,6 +135,48 @@ def start_session_run(
     )
     result = cast(
         dict[str, Any], graph.invoke(initial_state(task), config=_thread_config(session_id))
+    )
+    _apply_result(pool, session_id, result)
+
+
+def continue_session_run(
+    pool: DbPool,
+    checkpointer: BaseCheckpointSaver,
+    llm: LLMProvider,
+    *,
+    session_id: UUID,
+    task: str,
+    tavily_api_key: str,
+    http_client: httpx.Client | None = None,
+) -> None:
+    """The multi-turn sibling of `start_session_run` (ADR-030): loads the
+    prior turn's checkpointed state via `graph.get_state` rather than
+    starting from `initial_state`, so a follow-up message builds on the
+    messages and trace the agent already produced instead of starting a
+    blank conversation on a session the checkpointer already has history
+    for. Only called after `repo.restart_session` has already verified the
+    session was in a terminal, resumable status."""
+    graph = _build_graph_for_session(
+        llm,
+        checkpointer,
+        pool=pool,
+        session_id=session_id,
+        tavily_api_key=tavily_api_key,
+        http_client=http_client,
+    )
+    prior = graph.get_state(_thread_config(session_id)).values
+    # A session can reach a restartable terminal status (repo.restart_session)
+    # without the graph ever having been invoked at all -- e.g. a crash in
+    # send_message's own add_message call, before start_session_run got the
+    # chance to run (C4, ADR-020). No checkpoint then exists for this thread,
+    # so `prior` comes back `{}`; resumed_state assumes a real prior turn
+    # (its messages already carry the system prompt planner_node seeds only
+    # when starting fresh), so an empty prior falls back to initial_state
+    # instead, exactly what start_session_run would have done here.
+    next_state = resumed_state(cast(GraphState, prior), task) if prior else initial_state(task)
+    result = cast(
+        dict[str, Any],
+        graph.invoke(next_state, config=_thread_config(session_id)),
     )
     _apply_result(pool, session_id, result)
 

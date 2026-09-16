@@ -67,6 +67,25 @@ def start_session(pool: DbPool, session_id: UUID, *, task: str) -> dict[str, Any
         ).fetchone()
 
 
+def restart_session(pool: DbPool, session_id: UUID, *, task: str) -> dict[str, Any] | None:
+    """Sibling to `start_session` for a session's SECOND (or later) message
+    (ADR-030 supersedes ADR-015's one-task-per-session boundary): only
+    succeeds if the session reached a terminal, answer-or-failure-bearing
+    status from a prior turn. A session still 'running' or
+    'awaiting_approval' is genuinely mid-flight -- a second message there
+    would race the first, so those correctly match neither this WHERE
+    clause nor `start_session`'s, and the API layer's 409 still applies."""
+    with pool.connection() as conn:
+        return conn.execute(
+            """
+            UPDATE sessions SET task = %s, status = 'running', updated_at = now()
+            WHERE id = %s AND status IN ('done', 'degraded', 'failed')
+            RETURNING id, task, status, final_answer, archived_at, created_at, updated_at
+            """,
+            (task, session_id),
+        ).fetchone()
+
+
 def get_session(pool: DbPool, session_id: UUID) -> dict[str, Any] | None:
     with pool.connection() as conn:
         return conn.execute(

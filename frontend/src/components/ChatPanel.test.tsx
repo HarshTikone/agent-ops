@@ -156,4 +156,54 @@ describe('ChatPanel', () => {
     )
     expect(screen.getByRole('alert')).toHaveTextContent('message response was interrupted')
   })
+
+  describe('follow-up messages on a terminal session (ADR-030)', () => {
+    it.each(['done', 'degraded', 'failed'] as const)(
+      'shows a follow-up composer when the session is %s',
+      (status) => {
+        render(
+          <ChatPanel
+            session={makeSession({ status, task: 'first task', final_answer: 'first answer' })}
+            onSendMessage={vi.fn()}
+            submitting={false}
+            error={null}
+          />,
+        )
+        expect(screen.getByLabelText(/send a follow-up/i)).toBeInTheDocument()
+      },
+    )
+
+    it.each(['running', 'awaiting_approval'] as const)(
+      'does not show a follow-up composer while %s',
+      (status) => {
+        render(
+          <ChatPanel
+            session={makeSession({ status, task: 'first task' })}
+            onSendMessage={vi.fn()}
+            submitting={false}
+            error={null}
+          />,
+        )
+        expect(screen.queryByLabelText(/send a follow-up/i)).not.toBeInTheDocument()
+      },
+    )
+
+    it('calls onSendMessage with the trimmed follow-up draft on submit', async () => {
+      const user = userEvent.setup()
+      const onSendMessage = vi.fn()
+      render(
+        <ChatPanel
+          session={makeSession({ status: 'done', task: 'first task', final_answer: 'first answer' })}
+          onSendMessage={onSendMessage}
+          submitting={false}
+          error={null}
+        />,
+      )
+
+      await user.type(screen.getByLabelText(/send a follow-up/i), '  what about now?  ')
+      await user.click(screen.getByRole('button', { name: 'Send' }))
+
+      expect(onSendMessage).toHaveBeenCalledWith('what about now?')
+    })
+  })
 })

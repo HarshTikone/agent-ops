@@ -11,6 +11,8 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
+import pytest
+
 from app import repository as repo
 
 
@@ -62,6 +64,35 @@ def test_start_session_is_a_no_op_on_an_already_started_session(db_pool) -> None
     finally:
         with db_pool.connection() as conn:
             conn.execute("DELETE FROM sessions WHERE id = %s", (created["id"],))
+
+
+@pytest.mark.parametrize("terminal_status", ["done", "degraded", "failed"])
+def test_restart_session_moves_a_terminal_status_to_running_and_sets_new_task(
+    db_pool, terminal_status
+) -> None:
+    session = repo.create_session(db_pool, task="first task")
+    repo.update_session_status(db_pool, session["id"], status=terminal_status, final_answer="a")
+    restarted = repo.restart_session(db_pool, session["id"], task="second task")
+    try:
+        assert restarted["status"] == "running"
+        assert restarted["task"] == "second task"
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session["id"],))
+
+
+@pytest.mark.parametrize("non_terminal_status", ["created", "running", "awaiting_approval"])
+def test_restart_session_fails_on_a_non_terminal_status(db_pool, non_terminal_status) -> None:
+    session = repo.create_session(db_pool, task="first task")
+    if non_terminal_status != "created":
+        repo.update_session_status(db_pool, session["id"], status=non_terminal_status)
+    restarted = repo.restart_session(db_pool, session["id"], task="second task")
+    try:
+        assert restarted is None
+        assert repo.get_session(db_pool, session["id"])["task"] == "first task"
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session["id"],))
 
 
 def test_list_sessions_returns_most_recent_first(db_pool) -> None:

@@ -1985,3 +1985,74 @@ real arithmetic task in this project's tool set needs. Plain `int` results
   multiplication, which Python does not raise on) are not special-cased;
   `.12g` renders them as `"inf"`/`"nan"`, matching Python's own repr rather
   than a more explicit tool-level error.
+
+---
+
+## ADR-033: A session accepts a follow-up message once it reaches a terminal status
+
+**Date:** 2026-09-16 (post-release feature work)
+
+**Context**
+
+Day 3 (ADR-015) deliberately scoped a session to exactly one task: `send_message`
+only succeeds `WHERE status = 'created'`, so a second message to any other
+status was unconditionally a 409. That was the right call at the time — it
+kept the approval-pause design simple while it was being proven out — but it
+combined with `notes_store`'s per-session scoping (also a deliberate,
+independent choice) to close off a person's actual next question. Nothing
+the agent saved in one turn could ever be read back by a person, because no
+session could ever have a second turn: `session_memory` was architecturally
+write-only.
+
+A throwaway spike (not assumed from documentation) confirmed the mechanism
+this decision depends on: re-invoking a LangGraph thread whose checkpoint
+already reached `END`, passing a complete state dict rather than a partial
+update, re-enters at `START` and runs the graph fresh using exactly the
+values supplied — carrying prior data forward only because it was explicitly
+included, with no reliance on how a partial-dict merge against the
+checkpoint would behave (which was the one thing about the installed
+LangGraph version not safe to assume without checking).
+
+**Decision**
+
+`repo.restart_session` is `start_session`'s sibling, gated on `WHERE status
+IN ('done', 'degraded', 'failed')` instead of `'created'`. `send_message`
+tries `start_session` first, then `restart_session`; only a status in
+neither set (`running`, `awaiting_approval` — genuinely mid-flight) still
+produces the 409. `app.graph.state.resumed_state(prior, task)` builds a
+complete new `GraphState`: prior `messages` (with the new task appended as a
+`HumanMessage`) and `trace` carry forward; every per-run field (`plan`,
+`step_index`, `step_attempts`, `replans`, `tool_calls_made`, `last_*`,
+`next_action`, `status`, `final_answer`) resets exactly as `initial_state`
+would set it for a brand-new session. `session_runner.continue_session_run`
+is `start_session_run`'s sibling: it reads the prior turn's state via
+`graph.get_state(...).values` instead of building `initial_state`, then
+falls back to `initial_state` anyway if that read comes back empty — a
+session can reach a restartable terminal status without the graph ever
+having been invoked at all (e.g. a crash in `send_message`'s own
+`add_message` call, before `start_session_run` got the chance to run,
+ADR-020's C4), and `resumed_state` assumes a real prior turn whose messages
+already carry the planner's system prompt; an empty prior does not.
+
+Trace persistence needed no changes: `_persist_new_trace_events` already
+inserts by durable `(session_id, sequence)` with `ON CONFLICT DO NOTHING`
+(ADR-024), so replaying a follow-up turn's full accumulated trace — old
+events included, because `resumed_state` carries the whole prior trace list
+forward as the new run's starting point — reinserts the old ones as
+no-ops and only the new ones land.
+
+**What we gave up**
+
+- Each follow-up turn replays the full prior message history to the
+  planner; token cost (now visible per ADR's own P3 observability work)
+  grows with conversation length, uncapped and unsummarized. Deferred until
+  it's actually measured as a problem, not designed against speculatively.
+- `notes_store` being session-scoped, previously a limitation nobody could
+  actually hit, is now a real cross-turn capability with no new access
+  control of its own — a follow-up turn can read anything an earlier turn
+  in the SAME session wrote, which is the intended behavior, not a gap, but
+  is worth naming since it wasn't reachable before this decision.
+- No UI shows the full multi-turn message history yet — `ChatPanel` still
+  renders only the latest task/answer pair per session, with a follow-up
+  composer added below it on a terminal status. A real transcript view is
+  future work, not required for a follow-up message to work correctly.

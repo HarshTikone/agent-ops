@@ -35,7 +35,7 @@ from app.rate_limit import limiter
 from app.resources import get_http_client
 from app.sanitization import sanitize_error
 from app.security import require_operator_key
-from app.session_runner import start_session_run
+from app.session_runner import continue_session_run, start_session_run
 
 logger = logging.getLogger("agent_ops.api.sessions")
 
@@ -101,20 +101,29 @@ def send_message(
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
 
-    # Day 3 scope boundary (ADR-015): one task per session. A session's
-    # FIRST message starts its one graph run; a second message to a
-    # session that's already running/paused/finished is a clear 409, not a
-    # silent no-op or an implicit "start a new unrelated run."
+    # ADR-030 supersedes ADR-015's one-task-per-session boundary: a
+    # session's FIRST message starts its one graph run (start_session); a
+    # message to a session that already finished a prior turn (done/
+    # degraded/failed) starts a follow-up one on the same thread instead
+    # (restart_session) so it can build on what the agent already did. A
+    # session still running/paused matches neither WHERE clause, so a
+    # second message there is still a clear 409, not a silent no-op or an
+    # implicit "start a new unrelated run."
+    is_continuation = False
     started = repo.start_session(pool, session_id, task=body.content)
+    if started is None:
+        started = repo.restart_session(pool, session_id, task=body.content)
+        is_continuation = started is not None
     if started is None:
         raise HTTPException(
             status_code=409,
-            detail=f"session is '{session['status']}', not 'created' — cannot accept a new message",
+            detail=(f"session is '{session['status']}', not accepting a new message right now"),
         )
 
     try:
         repo.add_message(pool, session_id, role="user", content=body.content)
-        start_session_run(
+        run = continue_session_run if is_continuation else start_session_run
+        run(
             pool,
             checkpointer,
             llm,

@@ -359,14 +359,44 @@ def test_provider_crash_during_send_message_leaves_session_failed_not_stuck(db_p
         assert final["status"] == "failed"
         assert final["final_answer"]
 
-        # a retry must NOT hit the 409 "already running" trap forever --
-        # 'failed' is terminal, matching every other give_up path, so this
-        # correctly stays a 409 (one task per session, ADR-015), not a hang.
+        # 'failed' is a terminal status, but no longer a permanent trap
+        # (ADR-030 supersedes ADR-015's one-task-per-session boundary): a
+        # message to it is accepted as a follow-up turn via
+        # repo.restart_session, not rejected with a 409. The provider is
+        # still raising, so this retry crashes again -- correctly a fresh
+        # 502, not a hang and not a silent no-op.
         retry = client.post(f"/sessions/{session_id}/messages", json={"content": "retry"})
-        assert retry.status_code == 409
+        assert retry.status_code == 502
 
         events = repo.list_trace_events(db_pool, session_id)
-        assert any(e["node"] == "system" and "CRASH" in e["detail"] for e in events)
+        assert sum(1 for e in events if e["node"] == "system" and "CRASH" in e["detail"]) == 2
+    finally:
+        del app.dependency_overrides[get_llm_provider]
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+        create_checkpointer(db_pool).delete_thread(str(session_id))
+
+
+def test_message_to_an_awaiting_approval_session_still_409s(db_pool) -> None:
+    """The part of ADR-015's boundary ADR-030 keeps: a session genuinely
+    mid-flight -- paused on an approval, the one non-terminal status this
+    fully synchronous architecture can ever observe between two requests --
+    must still reject a second message with a 409. Only a session that
+    reached a terminal status (done/degraded/failed) can take a follow-up."""
+    from app.dependencies import get_llm_provider
+
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["id"]
+    app.dependency_overrides[get_llm_provider] = lambda: _approval_provider()
+    try:
+        sent = client.post(
+            f"/sessions/{session_id}/messages",
+            json={"content": "Save a note with key 'k' and content 'v'."},
+        )
+        assert sent.json()["status"] == "awaiting_approval"
+
+        blocked = client.post(f"/sessions/{session_id}/messages", json={"content": "anything"})
+        assert blocked.status_code == 409
     finally:
         del app.dependency_overrides[get_llm_provider]
         with db_pool.connection() as conn:
@@ -401,9 +431,17 @@ def test_add_message_failure_leaves_session_failed_not_stuck(db_pool) -> None:
         assert final["status"] == "failed"
         assert final["final_answer"]
 
-        # 'failed' is terminal, so a retry is a clean 409, not stuck 'running'.
+        # 'failed' is terminal but not a permanent trap (ADR-030): a retry
+        # is accepted as a follow-up turn, not rejected with a 409. Swap in
+        # a working provider to prove the session can actually recover, not
+        # just crash again in a different way.
+        app.dependency_overrides[get_llm_provider] = lambda: _ScriptedLLM(
+            [LLMResponse(content="retried successfully", tool_calls=[], provider="test")]
+        )
         retry = client.post(f"/sessions/{session_id}/messages", json={"content": "retry"})
-        assert retry.status_code == 409
+        assert retry.status_code == 200
+        assert retry.json()["status"] == "done"
+        assert retry.json()["final_answer"] == "retried successfully"
 
         events = repo.list_trace_events(db_pool, session_id)
         assert any(e["node"] == "system" and "CRASH" in e["detail"] for e in events)
@@ -622,4 +660,138 @@ def test_resume_failure_before_tool_attempt_leaves_action_approved(db_pool) -> N
         del app.dependency_overrides[get_llm_provider]
         with db_pool.connection() as conn:
             conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+
+
+def test_a_note_written_in_turn_one_is_read_back_in_turn_two(db_pool) -> None:
+    """ADR-030's core promise: notes_store is scoped per session (a
+    deliberate, pre-existing choice, not new here), so a follow-up turn on
+    the SAME session can read back what an earlier turn wrote -- something
+    no message before this feature could ever do, since a second message
+    was unconditionally a 409."""
+    from app.dependencies import get_llm_provider
+
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["id"]
+    scripted = _ScriptedLLM(
+        [
+            # turn 1: write (needs approval) -> verify -> finalize
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="t1",
+                        name="notes_store",
+                        arguments={"action": "write", "key": "k", "content": "v1"},
+                    )
+                ],
+                provider="test",
+            ),
+            LLMResponse(content="DONE", tool_calls=[], provider="test"),
+            LLMResponse(content="Saved v1 under key k.", tool_calls=[], provider="test"),
+            # turn 2: read (no approval needed) -> verify -> finalize
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="t2", name="notes_store", arguments={"action": "read", "key": "k"}
+                    )
+                ],
+                provider="test",
+            ),
+            LLMResponse(content="DONE", tool_calls=[], provider="test"),
+            LLMResponse(content="The note under key k stores v1.", tool_calls=[], provider="test"),
+        ]
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: scripted
+    try:
+        turn1 = client.post(
+            f"/sessions/{session_id}/messages",
+            json={"content": "Save a note with key 'k' and content 'v1', using the notes tool."},
+        )
+        assert turn1.json()["status"] == "awaiting_approval"
+        pending_action_id = turn1.json()["pending_action"]["id"]
+
+        approved = client.post(f"/approvals/{pending_action_id}/approve")
+        assert approved.json()["status"] == "done"
+
+        turn2 = client.post(
+            f"/sessions/{session_id}/messages",
+            json={"content": "What note is stored under key 'k'?"},
+        )
+        assert turn2.status_code == 200
+        assert turn2.json()["status"] == "done"
+        assert "v1" in turn2.json()["final_answer"]
+
+        # trace sequences keep climbing across turns -- unique and monotonic
+        # over the WHOLE session, not reset per turn.
+        events = repo.list_trace_events(db_pool, session_id)
+        sequences = [e["sequence"] for e in events]
+        assert sequences == sorted(sequences)
+        assert len(sequences) == len(set(sequences))
+        assert sequences == list(range(1, len(sequences) + 1))
+    finally:
+        del app.dependency_overrides[get_llm_provider]
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+        create_checkpointer(db_pool).delete_thread(str(session_id))
+
+
+def test_approval_in_turn_two_pauses_and_resumes_correctly(db_pool) -> None:
+    """A follow-up turn can hit the same approval gate a first turn can --
+    continuing a session must not bypass ADR-016's human-in-the-loop check."""
+    from app.dependencies import get_llm_provider
+
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["id"]
+
+    # turn 1: no tool call at all -- answers directly, done immediately.
+    app.dependency_overrides[get_llm_provider] = lambda: _ScriptedLLM(
+        [LLMResponse(content="Sure, what should I remember?", tool_calls=[], provider="test")]
+    )
+    turn1 = client.post(f"/sessions/{session_id}/messages", json={"content": "hello"})
+    assert turn1.json()["status"] == "done"
+
+    # turn 2: a write this time -- must still pause for approval, then
+    # (unlike every existing use of _approval_provider in this file, which
+    # short-circuits via a crash before reaching this far) actually run
+    # verify and finalize to completion.
+    app.dependency_overrides[get_llm_provider] = lambda: _ScriptedLLM(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="t1",
+                        name="notes_store",
+                        arguments={
+                            "action": "write",
+                            "key": "remember-this",
+                            "content": "an important fact",
+                        },
+                    )
+                ],
+                provider="test",
+            ),
+            LLMResponse(content="DONE", tool_calls=[], provider="test"),
+            LLMResponse(content="Saved the important fact.", tool_calls=[], provider="test"),
+        ]
+    )
+    try:
+        turn2 = client.post(
+            f"/sessions/{session_id}/messages",
+            json={"content": "Save a note with key 'remember-this'."},
+        )
+        assert turn2.status_code == 200
+        assert turn2.json()["status"] == "awaiting_approval"
+        pending_action_id = turn2.json()["pending_action"]["id"]
+        assert pending_action_id
+
+        approved = client.post(f"/approvals/{pending_action_id}/approve")
+        assert approved.json()["status"] == "done"
+        assert repo.read_note(db_pool, session_id, key="remember-this") == "an important fact"
+    finally:
+        del app.dependency_overrides[get_llm_provider]
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+        create_checkpointer(db_pool).delete_thread(str(session_id))
         create_checkpointer(db_pool).delete_thread(str(session_id))

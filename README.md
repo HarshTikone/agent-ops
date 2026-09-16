@@ -67,6 +67,12 @@ live in Postgres — `POST /sessions`, `GET /sessions`,
 `.../reject`. See `/docs` for the full schema, or `ADR.md` (ADR-014/015/016)
 for how the approval pause survives across separate requests.
 
+A session accepts a follow-up message once it reaches `done`, `degraded`, or
+`failed` (ADR-030) — the agent keeps its prior messages and notes for that
+session, so a second message can build on the first. `running` and
+`awaiting_approval` still reject a second message with a 409; a session is
+never mid-flight across two requests in this fully synchronous design.
+
 Sessions can be soft-archived without deleting them: `POST
 /sessions/{id}/archive` / `.../restore` set or clear `archived_at`. `GET
 /sessions` excludes archived sessions by default; pass

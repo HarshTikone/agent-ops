@@ -391,3 +391,23 @@ never a match for either rule — a deliberately long-lived state waiting on
 a human, not a stranding failure mode. Deliberately a script, not a startup
 sweep: with more than one instance a startup sweep races itself, and it
 would fire mid-deploy against a run that is genuinely still in flight.
+
+## 14. Multi-turn sessions
+
+`send_message` (ADR-030) tries `repo.start_session` (the original `'created'`
+gate) and then `repo.restart_session` (`WHERE status IN ('done', 'degraded',
+'failed')`); only `running`/`awaiting_approval` still 409. A restarted
+session runs through `session_runner.continue_session_run` instead of
+`start_session_run`: it reads the prior turn's checkpointed state via
+`graph.get_state(...)` and builds `app.graph.state.resumed_state(prior,
+task)` — a complete new `GraphState` carrying `messages` (the new task
+appended as a `HumanMessage`) and `trace` forward, with every per-run field
+reset the way `initial_state` sets it for a brand-new session. A session
+that reached its terminal status without the graph ever running at all (a
+crash before `start_session_run` got called) has no checkpoint to read, so
+`continue_session_run` falls back to `initial_state` in that case instead.
+Trace persistence needed no changes: `_persist_new_trace_events` already
+inserts by durable `(session_id, sequence)` with `ON CONFLICT DO NOTHING`
+(ADR-024), so re-sending a follow-up turn's full accumulated trace — old
+events included, since `resumed_state` carries the whole prior trace list
+forward — reinserts the old ones as no-ops.
