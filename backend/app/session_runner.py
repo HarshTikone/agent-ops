@@ -10,7 +10,9 @@ requests except the checkpointed graph state itself.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any, cast
 from uuid import UUID
 
@@ -29,9 +31,43 @@ from app.tools.registry import build_tool_registry, to_langchain_tools
 
 logger = logging.getLogger("agent_ops.session_runner")
 
+# Referenced by name inside _heartbeat's background thread, not captured as a
+# default-argument value, specifically so tests can shorten it with
+# monkeypatch.setattr(session_runner, "HEARTBEAT_INTERVAL_SECONDS", ...) and
+# have it take effect on the very next wait -- a default parameter value is
+# bound once, at definition time, and wouldn't observe the patch.
+HEARTBEAT_INTERVAL_SECONDS = 60.0
+
 
 def _thread_config(session_id: UUID) -> RunnableConfig:
     return {"configurable": {"thread_id": str(session_id)}}
+
+
+@contextmanager
+def _heartbeat(pool: DbPool, session_id: UUID) -> Iterator[None]:
+    """Keeps `sessions.updated_at` moving for the duration of one graph
+    `.invoke()` call (WP2, ADR-035): a single LLM call, a provider failover,
+    or a slow tool can legitimately take minutes, and outside of this,
+    `updated_at` only changes at the start and the end of a run -- making a
+    genuinely slow run indistinguishable from a dead one to
+    `scripts/reap_sessions.py`'s staleness check. A heartbeat failure is
+    logged and swallowed; it must never fail the run it's only observing."""
+    stop = threading.Event()
+
+    def _beat() -> None:
+        while not stop.wait(HEARTBEAT_INTERVAL_SECONDS):
+            try:
+                repo.touch_running_session(pool, session_id)
+            except Exception:
+                logger.warning("heartbeat_touch_failed session_id=%s", session_id, exc_info=True)
+
+    thread = threading.Thread(target=_beat, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=5)
 
 
 def _build_graph_for_session(
@@ -184,9 +220,10 @@ def start_session_run(
         tavily_api_key=tavily_api_key,
         http_client=http_client,
     )
-    result = cast(
-        dict[str, Any], graph.invoke(initial_state(task), config=_thread_config(session_id))
-    )
+    with _heartbeat(pool, session_id):
+        result = cast(
+            dict[str, Any], graph.invoke(initial_state(task), config=_thread_config(session_id))
+        )
     _apply_result(pool, session_id, result)
 
 
@@ -233,10 +270,11 @@ def continue_session_run(
     # sequence at a number a database row already occupies. Overwriting
     # with the database's own trace here closes that gap at the source.
     next_state["trace"] = _persisted_trace(pool, session_id)
-    result = cast(
-        dict[str, Any],
-        graph.invoke(next_state, config=_thread_config(session_id)),
-    )
+    with _heartbeat(pool, session_id):
+        result = cast(
+            dict[str, Any],
+            graph.invoke(next_state, config=_thread_config(session_id)),
+        )
     _apply_result(pool, session_id, result)
 
 
@@ -252,6 +290,16 @@ def resume_session_run(
     pending_action_id: UUID | None = None,
     http_client: httpx.Client | None = None,
 ) -> None:
+    """Deliberately NOT wrapped in `_heartbeat` (WP2, ADR-035), unlike its
+    two siblings above: `sessions.status` stays `'awaiting_approval'` for
+    this call's entire duration -- nothing sets it back to `'running'`
+    before this resumes, and `_apply_result` is what finally moves it to a
+    terminal status at the end. `touch_running_session`'s own `WHERE
+    status = 'running'` guard would make a heartbeat here a no-op, and it
+    would be redundant even if it weren't: `reap_action` exempts
+    `awaiting_approval` unconditionally, regardless of how long it's been
+    (ADR-031) -- there is no staleness risk this call could ever be mistaken
+    for, so there is nothing for a heartbeat here to protect against."""
     on_attempt: Callable[[], None] | None = None
     if approved and pending_action_id is not None:
 

@@ -86,6 +86,53 @@ def restart_session(pool: DbPool, session_id: UUID, *, task: str) -> dict[str, A
         ).fetchone()
 
 
+def touch_running_session(pool: DbPool, session_id: UUID) -> None:
+    """Bumps `updated_at` without touching status -- the heartbeat's own
+    write (WP2, ADR-035), keeping a session whose single graph `.invoke()`
+    call is legitimately still running from looking indistinguishable from
+    a dead one to `scripts/reap_sessions.py`'s staleness check. Guarded on
+    `status = 'running'` so a heartbeat that fires just after the run
+    finished (a benign race, not a bug) can't resurrect `updated_at` on a
+    session that has already moved to a terminal status."""
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE sessions SET updated_at = now() WHERE id = %s AND status = 'running'",
+            (session_id,),
+        )
+
+
+def fail_stale_running_session(
+    pool: DbPool,
+    session_id: UUID,
+    *,
+    expected_updated_at: Any,
+    final_answer: str,
+    reason: str,
+) -> bool:
+    """Compare-and-swap sibling to the plain fail-and-log the reaper used to
+    do (WP2, ADR-035): only fails the session if it is still 'running' AND
+    its `updated_at` still matches what the caller read before deciding it
+    looked stale. Closes the gap between the reaper's read and its write,
+    during which the run could have genuinely finished (or been touched by
+    its own heartbeat) -- a plain unconditional UPDATE would silently
+    overwrite that real result. The REAPED trace row is written in the same
+    transaction, so it only lands when the swap actually happens. Returns
+    whether the write happened."""
+    with pool.connection() as conn, conn.transaction():
+        updated = conn.execute(
+            """
+            UPDATE sessions SET status = 'failed', final_answer = %s, updated_at = now()
+            WHERE id = %s AND status = 'running' AND updated_at = %s
+            RETURNING id
+            """,
+            (final_answer, session_id, expected_updated_at),
+        ).fetchone()
+        if updated is None:
+            return False
+        add_trace_event_on_connection(conn, session_id, node="system", detail=f"REAPED: {reason}")
+        return True
+
+
 def get_session(pool: DbPool, session_id: UUID) -> dict[str, Any] | None:
     with pool.connection() as conn:
         return conn.execute(

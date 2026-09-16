@@ -9,6 +9,7 @@ never have surfaced.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -370,3 +371,93 @@ def test_list_sessions_for_maintenance_includes_archived(db_pool, session_row) -
     rows = repo.list_sessions_for_maintenance(db_pool)
     found = next(row for row in rows if row["id"] == session_row["id"])
     assert found["archived_at"] is not None
+
+
+def test_touch_running_session_bumps_updated_at(db_pool) -> None:
+    session = repo.create_session(db_pool, task="running task")
+    try:
+        before = repo.get_session(db_pool, session["id"])["updated_at"]
+        repo.touch_running_session(db_pool, session["id"])
+        after = repo.get_session(db_pool, session["id"])["updated_at"]
+        assert after > before
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session["id"],))
+
+
+def test_touch_running_session_is_a_no_op_on_a_non_running_session(db_pool) -> None:
+    """A blank-task session starts life in 'created', not 'running'
+    (repo.create_session only inserts with status='running' when a task is
+    given) -- the guard this test exercises."""
+    session = repo.create_session(db_pool)
+    try:
+        assert session["status"] == "created"
+        before = repo.get_session(db_pool, session["id"])["updated_at"]
+        repo.touch_running_session(db_pool, session["id"])
+        after = repo.get_session(db_pool, session["id"])["updated_at"]
+        assert after == before
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session["id"],))
+
+
+def test_fail_stale_running_session_succeeds_when_untouched(db_pool) -> None:
+    session = repo.create_session(db_pool, task="stale task")
+    session_id = session["id"]
+    try:
+        succeeded = repo.fail_stale_running_session(
+            db_pool,
+            session_id,
+            expected_updated_at=session["updated_at"],
+            final_answer="interrupted",
+            reason="running with no update for 15+ minutes",
+        )
+        assert succeeded
+
+        final = repo.get_session(db_pool, session_id)
+        assert final["status"] == "failed"
+        assert final["final_answer"] == "interrupted"
+
+        events = repo.list_trace_events(db_pool, session_id)
+        assert any(e["node"] == "system" and "REAPED" in e["detail"] for e in events)
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+
+
+def test_fail_stale_running_session_skips_when_touched_since_read(db_pool) -> None:
+    """The row changing between the reaper's read and its write -- a
+    heartbeat, or the run genuinely finishing -- must block the write, not
+    race it (WP2, ADR-035)."""
+    session = repo.create_session(db_pool, task="stale task")
+    session_id = session["id"]
+    stale_updated_at = session["updated_at"]
+    repo.touch_running_session(db_pool, session_id)  # simulates a heartbeat firing
+    try:
+        succeeded = repo.fail_stale_running_session(
+            db_pool,
+            session_id,
+            expected_updated_at=stale_updated_at,
+            final_answer="interrupted",
+            reason="should not apply",
+        )
+        assert not succeeded
+
+        final = repo.get_session(db_pool, session_id)
+        assert final["status"] == "running"
+        assert final["final_answer"] is None
+        assert repo.list_trace_events(db_pool, session_id) == []
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+
+
+def test_fail_stale_running_session_returns_false_when_missing(db_pool) -> None:
+    succeeded = repo.fail_stale_running_session(
+        db_pool,
+        uuid.uuid4(),
+        expected_updated_at=datetime.now(UTC),
+        final_answer="interrupted",
+        reason="test",
+    )
+    assert not succeeded

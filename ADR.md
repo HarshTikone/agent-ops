@@ -1944,6 +1944,8 @@ and reaping it would silently kill a pending approval.
 - A `running` session's `updated_at` is the only signal available; there is
   no heartbeat distinguishing "the process is still working" from "the
   process is dead," so the threshold is a proxy for the latter, not proof.
+  Closed by ADR-035, which also closes the separate read-then-write race
+  this ADR's own writes had no guard against.
 
 ---
 
@@ -2162,3 +2164,116 @@ existed only from ADR-033 landing to this fix.
   source-of-truth change should make the conflict path unreachable in
   practice going forward. If it fires in production, that assumption was wrong
   somewhere and is worth a fresh investigation, not a silent counter.
+
+---
+
+## ADR-035: The reaper's staleness check gets a heartbeat and a compare-and-swap
+
+**Date:** 2026-09-16 (Sprint 04 QA remediation)
+
+**Context**
+
+ADR-031 already named this as accepted risk: `updated_at` is the only signal
+`scripts/reap_sessions.py` has for "is this run still alive," and it only
+changes when a run starts and when it ends — a genuinely healthy run that is
+just slow looks identical to a dead one for the whole time in between.
+
+Rather than reuse the sprint doc's rough "16–20 minute" estimate unverified,
+the actual worst case was traced against this repo's own code:
+
+- `decide_next_node`/`verify_node` share one budget, `state["replans"]`,
+  capped at `MAX_PLANNING_ROUNDS = 4` (`graph/limits.py`). Tracing the exact
+  branch order in `verify_node` — the `if complete: -> finalize` check runs
+  *before* the `replans >= MAX_PLANNING_ROUNDS` check, so even the round that
+  exhausts the budget can still reach `finalize` if the model says the task
+  is done — the true maximum is **5 planner calls, 5 verify calls, and up to
+  2 finalize calls** (primary rejected, `retry_llm` accepted): 12 LLM calls,
+  not the 16 the sprint doc guessed at.
+- Each `.generate()` call can cost up to 60s: confirmed
+  `_REQUEST_TIMEOUT_SECONDS = 30` in both `app/llm/gemini.py` and
+  `app/llm/openrouter.py`, and `FailoverProvider.generate` (`app/llm/
+  failover.py`) tries the fallback once after the primary's
+  `TransientProviderError` — one timeout, one fallback attempt, both to their
+  own 30s ceiling.
+- 12 calls × 60s ≈ **12 minutes from LLM calls alone** — under
+  `RUNNING_STALE_AFTER`'s 15 minutes, but with `MAX_TOOL_CALLS = 10` allowing
+  up to 5 more tool invocations beyond the 5 successful steps that maximize
+  the LLM count above, each a potential retry of a tool with its own timeout
+  (`web_search`'s confirmed `_REQUEST_TIMEOUT_SECONDS = 15`), worst case rises
+  toward 13+ minutes before counting any per-request overhead the nominal
+  timeouts don't (network latency, Render's own handling, DB round trips
+  inside the same request).
+
+The corrected number is lower than the sprint doc's guess, but the
+conclusion is the same: a legitimately healthy, still-executing run can land
+within a couple of minutes of `RUNNING_STALE_AFTER` with no margin for
+ordinary jitter, which is close enough that "wait for the threshold and hope"
+is not an acceptable design once it's actually possible to do better.
+
+Separately, `scripts/reap_sessions.py` also wrote a fail-and-log with no
+guard at all: two unconditional statements (`add_trace_event` then
+`update_session_status`) with nothing stopping them from running after the
+session had already genuinely finished between the reaper's read and its
+write.
+
+**Decision**
+
+Two independent protections, addressing the two different gaps:
+
+1. **Heartbeat** (the real fix for the timing gap): `session_runner._heartbeat`
+   is a context manager wrapping a graph `.invoke()` call with a daemon
+   thread that calls `repo.touch_running_session` (`UPDATE ... SET updated_at
+   = now() WHERE id = %s AND status = 'running'`) every
+   `HEARTBEAT_INTERVAL_SECONDS` (60s — four heartbeats within the 15-minute
+   threshold even in the worst single-gap case). A heartbeat failure is
+   logged and swallowed; it must never fail the run it only observes.
+   `start_session_run` and `continue_session_run` are wrapped.
+   `resume_session_run` deliberately is not: `sessions.status` stays
+   `'awaiting_approval'` for that call's entire duration (nothing sets it
+   back to `'running'` before the resume, `_apply_result` is what finally
+   moves it to a terminal status), so `touch_running_session`'s own `WHERE
+   status = 'running'` guard would make a heartbeat there a no-op — and
+   `reap_action` exempts `awaiting_approval` unconditionally regardless of
+   duration (ADR-031), so there is no staleness risk for a heartbeat there to
+   guard against in the first place.
+2. **Compare-and-swap** (closes the read-then-write gap the heartbeat alone
+   doesn't): `repo.fail_stale_running_session(pool, id, *,
+   expected_updated_at, final_answer, reason)` replaces the reaper's two
+   unconditional writes with one transaction: `UPDATE ... WHERE id = %s AND
+   status = 'running' AND updated_at = %s RETURNING id`, writing the REAPED
+   trace row only if a row actually came back. `scripts/reap_sessions.py`
+   reports any session skipped because it changed since being read, rather
+   than silently overwriting a result that arrived in the gap.
+
+**Mutation check (ADR-007 standard)**
+
+- Removed the `updated_at = %s` predicate from `fail_stale_running_session`:
+  `test_fail_stale_running_session_skips_when_touched_since_read` failed
+  (the stale write went through). Restored, passes.
+- Replaced `start_session_run`'s `_heartbeat` wrapper with a no-op context
+  manager: `test_heartbeat_keeps_updated_at_moving_during_a_slow_run` failed
+  (`updated_at` never moved mid-flight). Restored, passes.
+- Full suite (316 tests, DB-backed included) against real local PostgreSQL
+  17: all green, ruff/black/mypy clean.
+
+**What we gave up**
+
+- The heartbeat interval (60s) and the corrected worst-case estimate (~12–13
+  minutes) still leave a real but narrow gap under the unchanged 15-minute
+  `RUNNING_STALE_AFTER`: this fixes the *false-positive* reap of a healthy
+  slow run, it does not widen the threshold itself. Left alone rather than
+  bundled into this change, since the two are independent knobs and this fix
+  is what actually matters — a session getting a few extra minutes of
+  genuine runway from a larger threshold was never the problem.
+- If the heartbeat's own background thread dies silently (an unhandled
+  exception outside the `try` in `_beat`, or the process itself being killed,
+  which takes the thread with it), a live run can still be reaped. When that
+  run then finishes, its final write can collide with the REAPED row exactly
+  as ADR-034 describes — which is now a logged `trace_sequence_conflict`
+  instead of a silent loss, not a scenario this ADR claims to prevent
+  outright.
+- `touch_running_session` and `fail_stale_running_session` are each one more
+  round trip against the pool (`max_size=5`, `app/db.py`); a heartbeat firing
+  every 60s across concurrently-running sessions is negligible next to the
+  LLM calls it runs alongside, but is a real, if small, additional draw on
+  the same shared pool.

@@ -105,15 +105,34 @@ def main() -> None:
             print("\nDry run only -- pass --apply to reap these sessions for real.")
             return
 
+        applied = 0
+        skipped = 0
         for session, action, reason in plan:
             if action == "fail":
-                repo.add_trace_event(pool, session["id"], node="system", detail=f"REAPED: {reason}")
-                repo.update_session_status(
-                    pool, session["id"], status="failed", final_answer=_INTERRUPTED_MESSAGE
+                # Compare-and-swap (WP2, ADR-035): only writes if the session
+                # is still 'running' with the exact updated_at just read --
+                # closes the gap between reading it as stale and writing to
+                # it, during which the run could have genuinely finished.
+                succeeded = repo.fail_stale_running_session(
+                    pool,
+                    session["id"],
+                    expected_updated_at=session["updated_at"],
+                    final_answer=_INTERRUPTED_MESSAGE,
+                    reason=reason,
                 )
+                if succeeded:
+                    applied += 1
+                else:
+                    skipped += 1
+                    print(
+                        f"  skipped {session['id']} -- changed since it was read "
+                        "(still running, or finished in the meantime)"
+                    )
             else:
                 repo.archive_session(pool, session["id"])
-        print(f"\nReaped {len(plan)} session(s).")
+                applied += 1
+        skip_note = f" ({skipped} skipped -- changed since being read)" if skipped else ""
+        print(f"\nReaped {applied} session(s).{skip_note}")
     finally:
         pool.close()
 

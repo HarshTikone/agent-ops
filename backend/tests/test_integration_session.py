@@ -23,6 +23,7 @@ Two complementary tests:
 from __future__ import annotations
 
 import logging
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -31,6 +32,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import repository as repo
+from app import session_runner
 from app.db import create_checkpointer, get_checkpointer, get_db_pool
 from app.graph.build import build_graph
 from app.graph.state import initial_state
@@ -269,6 +271,49 @@ def test_forced_transient_failure_retries_and_persists_correctly(db_pool) -> Non
         )
         assert any(node == "decide_next" and "retry" in detail for node, detail in details_by_node)
         assert any(node == "tool_call" and detail == "OK: 4" for node, detail in details_by_node)
+    finally:
+        with db_pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+        create_checkpointer(db_pool).delete_thread(str(session_id))
+
+
+def test_heartbeat_keeps_updated_at_moving_during_a_slow_run(db_pool, monkeypatch) -> None:
+    """WP2 (Sprint 04, ADR-035): a single LLM call can legitimately take
+    minutes (a real provider timeout plus failover) -- outside of a
+    heartbeat, `updated_at` only changes at the start and the end of a run,
+    making a genuinely slow one indistinguishable from a dead one to
+    `scripts/reap_sessions.py`'s staleness check. The heartbeat must keep
+    `updated_at` moving while a run is genuinely still executing, not just
+    at the moment it finishes."""
+    monkeypatch.setattr(session_runner, "HEARTBEAT_INTERVAL_SECONDS", 0.05)
+
+    session = repo.create_session(db_pool)
+    session_id = session["id"]
+    repo.start_session(db_pool, session_id, task="slow task")
+    before = repo.get_session(db_pool, session_id)["updated_at"]
+    observed = {"moved": False}
+
+    class _SlowLLM:
+        def generate(self, messages, tools=None) -> LLMResponse:
+            # Several heartbeat intervals (0.05s each) at 0.2s -- the
+            # heartbeat thread should have fired at least once by now.
+            time.sleep(0.2)
+            current = repo.get_session(db_pool, session_id)["updated_at"]
+            observed["moved"] = current > before
+            return LLMResponse(
+                content="a real enough answer for this test", tool_calls=[], provider="test"
+            )
+
+    try:
+        session_runner.start_session_run(
+            db_pool,
+            create_checkpointer(db_pool),
+            _SlowLLM(),
+            session_id=session_id,
+            task="slow task",
+            tavily_api_key="",
+        )
+        assert observed["moved"], "updated_at never moved while the run was still executing"
     finally:
         with db_pool.connection() as conn:
             conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))

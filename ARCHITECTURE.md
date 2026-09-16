@@ -392,6 +392,24 @@ a human, not a stranding failure mode. Deliberately a script, not a startup
 sweep: with more than one instance a startup sweep races itself, and it
 would fire mid-deploy against a run that is genuinely still in flight.
 
+`updated_at` alone can't reliably prove a `running` session is actually dead
+(ADR-035): outside of a heartbeat, it only changes at the start and the end
+of a run, and a single LLM call plus its failover can legitimately take up
+to a minute, with a multi-round plan able to chain several of those —
+verified against this repo's own limits (`graph/limits.py`,
+`_REQUEST_TIMEOUT_SECONDS` in `llm/gemini.py`/`llm/openrouter.py`/
+`tools/web_search.py`) at up to ~12-13 minutes worst case, close enough to
+the 15-minute threshold to matter. `session_runner._heartbeat` wraps
+`start_session_run`'s and `continue_session_run`'s graph `.invoke()` calls
+with a background thread that keeps `updated_at` moving every 60s while a
+run is genuinely still executing (not `resume_session_run`: that call's
+session stays `awaiting_approval`, never `running`, for its whole duration,
+a status the reaper already exempts unconditionally). The reaper itself
+writes through `repo.fail_stale_running_session`, a compare-and-swap on
+`(status = 'running', updated_at = <the value just read>)`, so a run that
+finishes (or is touched by its own heartbeat) between the reaper's read and
+its write is skipped instead of overwritten.
+
 ## 14. Multi-turn sessions
 
 `send_message` (ADR-033) tries `repo.start_session` (the original `'created'`
