@@ -27,4 +27,13 @@ describe('App', () => {
       '/',
     )
   })
+
+  it('keeps the guided demo credential-free', () => {
+    window.history.pushState({}, '', '/demo')
+    render(<App />)
+
+    expect(screen.getByText('INTERACTIVE DEMO')).toBeInTheDocument()
+    expect(screen.queryByRole('form', { name: 'Operator credentials' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Approve and resume' })).toBeInTheDocument()
+  })
 })

@@ -2,10 +2,15 @@
 
 [![CI](https://github.com/HarshTikone/agent-ops/actions/workflows/ci.yml/badge.svg)](https://github.com/HarshTikone/agent-ops/actions/workflows/ci.yml)
 [![Live Demo](https://img.shields.io/badge/demo-live-4c8cbd)](https://agent-ops-sage.vercel.app/)
+[![Guided Demo](https://img.shields.io/badge/guided_demo-resilience_scenario-597ea3)](https://agent-ops-sage.vercel.app/demo)
 
 > **Live demo:** [agent-ops-sage.vercel.app](https://agent-ops-sage.vercel.app/)
 > — browse completed sessions and inspect their full traces without signing in.
 > The free backend may take about a minute to wake up.
+
+> **Recruiter walkthrough:** [open the no-credentials resilience demo](https://agent-ops-sage.vercel.app/demo)
+> to see multi-step research, provider failover, tool-error recovery, prompt-injection
+> defense, and an explicit approval boundary in one auditable trace.
 
 ![Agent Ops product demo](docs/agent-ops-demo.gif)
 

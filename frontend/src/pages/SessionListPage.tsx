@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import {
   archiveSession,
   createSession,
@@ -123,15 +123,20 @@ export function SessionListPage() {
             Every task the planner has run, with its full trace.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={handleNewSession}
-          disabled={creating}
-          className="btn btn-primary"
-        >
-          <PlusIcon />
-          {creating ? 'Creating…' : 'New session'}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <Link to="/demo" className="btn btn-secondary">
+            View guided demo
+          </Link>
+          <button
+            type="button"
+            onClick={handleNewSession}
+            disabled={creating}
+            className="btn btn-primary"
+          >
+            <PlusIcon />
+            {creating ? 'Creating…' : 'New session'}
+          </button>
+        </div>
       </div>
 
       {createError && (
