@@ -1,11 +1,13 @@
 # Agent Ops
 
 [![CI](https://github.com/HarshTikone/agent-ops/actions/workflows/ci.yml/badge.svg)](https://github.com/HarshTikone/agent-ops/actions/workflows/ci.yml)
+[![Live Demo](https://img.shields.io/badge/demo-live-4c8cbd)](https://agent-ops-sage.vercel.app/)
 
-> **Status: release candidate implemented and locally verified.** Security,
-> persistence, approval accessibility, secret-free CI, and deployment
-> configuration are in place. Public Render/Vercel verification is the final
-> release gate; no public URL is claimed until that walkthrough passes.
+> **Live demo:** [agent-ops-sage.vercel.app](https://agent-ops-sage.vercel.app/)
+> — browse completed sessions and inspect their full traces without signing in.
+> The free backend may take about a minute to wake up.
+
+![Agent Ops product demo](docs/agent-ops-demo.gif)
 
 A multi-agent orchestration copilot: a planner agent breaks an incoming task
 into steps and delegates each to a tool-using sub-agent (web search, a
