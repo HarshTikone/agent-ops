@@ -14,6 +14,15 @@
 
 ![Agent Ops product demo](docs/agent-ops-demo.gif)
 
+## Architecture at a glance
+
+![Agent Ops architecture: user request flows through the planner, sub-agents, tools, approval gate, verifier, and durable trace store](docs/agent-ops-architecture.svg)
+
+Every stage emits structured events into the append-only trace. Irreversible tool calls pause at
+the persisted approval gate, while transient provider and tool failures remain visible through
+automatic failover and bounded recovery. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the detailed
+state machine and design rationale.
+
 A multi-agent orchestration copilot: a planner agent breaks an incoming task
 into steps and delegates each to a tool-using sub-agent (web search, a
 notes/document store, a calculator). Every irreversible action pauses for
